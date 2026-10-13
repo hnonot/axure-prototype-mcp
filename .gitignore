@@ -1,6 +1,8 @@
 node_modules/
 dist/
 recon-out/
+selftest-out/
+.axure-mcp/shots/
 *.log
 .env
 .DS_Store
