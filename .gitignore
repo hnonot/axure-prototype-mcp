@@ -6,3 +6,4 @@ selftest-out/
 *.log
 .env
 .DS_Store
+update/

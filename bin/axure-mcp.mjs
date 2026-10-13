@@ -1,15 +1,18 @@
+#!/usr/bin/env node
 /**
  * Axure Prototype MCP launcher.
  *
- * Supports two transports:
+ *   node bin/axure-mcp.mjs                      # stdio (default; what DSH uses)
+ *   node bin/axure-mcp.mjs --http               # Streamable HTTP on 127.0.0.1:3333
+ *   node bin/axure-mcp.mjs --http --host 0.0.0.0   # requires AXURE_HTTP_TOKEN
  *
- *   node bin/axure-mcp.mjs                      # stdio (default; used by DSH)
- *   node bin/axure-mcp.mjs --http --port 3333   # Streamable HTTP at /mcp
- *
- * Configuration comes from the environment; see README.md for the full list.
+ * Configuration comes from the environment; run with --help for the full list.
  */
 
-import { runStdio, createServer, loadConfig, stderrLogger } from '../dist/server.js';
+import { createRuntime, runStdio } from '../dist/server.js';
+import { loadConfig } from '../dist/config.js';
+import { ConfigError, messageOf } from '../dist/errors.js';
+import { createLogger } from '../dist/logger.js';
 
 const argv = process.argv.slice(2);
 const flag = (name) => argv.includes(`--${name}`);
@@ -22,51 +25,90 @@ const value = (name, fallback) => {
 if (flag('help') || flag('h')) {
   process.stdout.write(
     [
-      'axure-prototype-mcp',
+      'axure-prototype-mcp — read an Axure prototype over the Model Context Protocol',
       '',
       'Usage:',
       '  axure-mcp [--http] [--port <n>] [--host <addr>]',
       '',
+      'Transport:',
+      '  (default)              stdio; the client spawns this process',
+      '  --http                 Streamable HTTP at http://127.0.0.1:3333/mcp',
+      '  --port <n>             HTTP port, 1..65535 (env AXURE_HTTP_PORT)',
+      '  --host <addr>          HTTP bind address (env AXURE_HTTP_HOST). Any non-loopback',
+      '                         address requires AXURE_HTTP_TOKEN.',
+      '',
       'Environment:',
-      '  AXURE_URL                  Axure project share URL (default https://axure.example.com/ProjectB)',
-      '  AXURE_HEADLESS             true|false (default true)',
-      '  AXURE_VIEWPORT_WIDTH       default 1440',
-      '  AXURE_VIEWPORT_HEIGHT      default 900',
-      '  AXURE_NAV_TIMEOUT_MS       default 60000',
-      '  AXURE_SETTLE_MS            extra wait after load, default 4000',
-      '  AXURE_MAX_OUTLINE_NODES    default 1200',
-      '  AXURE_OUTLINE_CHAR_BUDGET  default 48000',
-      '  AXURE_BROWSER_IDLE_MS      close browser after idle, default 300000',
-      '  AXURE_NO_PROXY             proxy bypass list, default internal hosts',
-      '  AXURE_SCREENSHOT_DIR       default .axure-mcp/shots',
-      '  AXURE_DEBUG=1              verbose stderr logging',
+      '  AXURE_URL                        Axure project share URL (default https://axure.example.com/ProjectB)',
+      '  AXURE_ALLOWED_HOSTS              extra hosts the browser may visit, comma separated',
+      '  AXURE_HEADLESS                   true|false (default true)',
+      '  AXURE_VIEWPORT_WIDTH             default 1440',
+      '  AXURE_VIEWPORT_HEIGHT            default 900',
+      '  AXURE_DEVICE_SCALE_FACTOR        1..3, fixed per browser context (default 1)',
+      '  AXURE_MAX_CAPTURE_VIEWPORT_WIDTH  default 3840',
+      '  AXURE_MAX_CAPTURE_VIEWPORT_HEIGHT default 2160',
+      '  AXURE_NAV_TIMEOUT_MS             default 60000',
+      '  AXURE_OPERATION_TIMEOUT_MS       per in-page call, default 20000',
+      '  AXURE_SETTLE_MS                  extra wait after load, default 4000',
+      '  AXURE_OUTLINE_CHAR_BUDGET        response text budget, default 48000',
+      '  AXURE_MAX_OUTLINE_NODES          default 1200',
+      '  AXURE_MAX_WIDGET_IDS             default 40',
+      '  AXURE_MAX_PAGES                  default 500',
+      '  AXURE_BROWSER_IDLE_MS            close chromium after idle, default 300000',
+      '  AXURE_NO_PROXY                   proxy bypass list',
+      '  AXURE_SCREENSHOT_DIR             base dir for savePath (default .axure-mcp/shots)',
+      '  AXURE_LOG_LEVEL                  debug|info|warn|error (default info)',
+      '  AXURE_HTTP_PORT / AXURE_HTTP_HOST / AXURE_HTTP_TOKEN',
       '',
     ].join('\n'),
   );
   process.exit(0);
 }
 
-const config = loadConfig();
+/** Report a configuration problem plainly and exit non-zero. */
+function fail(message) {
+  process.stderr.write(`[axure-mcp] error: ${message}\n`);
+  process.exit(2);
+}
+
+let config;
+try {
+  config = loadConfig();
+} catch (error) {
+  fail(messageOf(error));
+}
+
+const logger = createLogger(config.logLevel, { server: 'axure-prototype' });
 
 if (flag('http')) {
-  const { StartHttpTransport } = await import('../dist/http.js');
-  const { BrowserPool } = await import('../dist/browser.js');
-  const pool = new BrowserPool(config, stderrLogger);
-  const started = await StartHttpTransport(
-    (sharedPool) => createServer({ config, pool: sharedPool }).server,
-    {
-      port: Number.parseInt(value('port', process.env.AXURE_HTTP_PORT ?? '3333'), 10),
-      host: value('host', process.env.AXURE_HTTP_HOST ?? '127.0.0.1'),
-    },
-    pool,
-  );
+  const { startHttpTransport } = await import('../dist/http.js');
+  const port = Number.parseInt(value('port', process.env.AXURE_HTTP_PORT ?? '3333'), 10);
+  const host = value('host', process.env.AXURE_HTTP_HOST ?? '127.0.0.1');
+  const token = process.env.AXURE_HTTP_TOKEN;
+
+  const primary = createRuntime({ config, log: logger });
+  const started = await startHttpTransport(
+    () => createRuntime({ config, log: logger, sharedAdapter: primary.adapter }).server,
+    { port, host, token },
+    logger,
+    () => primary.service.dispose(),
+  ).catch((error) => {
+    fail(messageOf(error));
+  });
+
   const shutdown = async (reason) => {
-    stderrLogger('info', 'shutting down', { reason });
+    logger.info('shutting down', { reason });
     await started.close();
     process.exit(0);
   };
   process.on('SIGINT', () => void shutdown('SIGINT'));
   process.on('SIGTERM', () => void shutdown('SIGTERM'));
+  process.on('uncaughtException', (error) => {
+    logger.error('uncaught exception', { error: messageOf(error) });
+    void shutdown('uncaughtException');
+  });
 } else {
-  await runStdio({ config });
+  await runStdio({ config, log: logger }).catch((error) => {
+    if (error instanceof ConfigError) fail(messageOf(error));
+    fail(messageOf(error));
+  });
 }

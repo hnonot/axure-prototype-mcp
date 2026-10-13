@@ -30,6 +30,29 @@ const check = (name, ok, detail = '') => {
   console.log(`${ok ? 'PASS' : 'FAIL'}  ${name}${detail ? `  — ${detail}` : ''}`);
 };
 
+/**
+ * Call a tool, converting a thrown client-side error into a check failure.
+ *
+ * The SDK client throws when `structuredContent` does not satisfy the tool's declared
+ * `outputSchema`. That validation is exactly what we want to prove works, so a violation must
+ * be reported as a failed check with the schema message instead of aborting the whole run.
+ */
+const call = async (name, args, label, extra = {}) => {
+  try {
+    return await client.callTool({ name, arguments: args });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    check(label, false, `threw: ${message.split('\n')[0]}`);
+    if (extra.fatal) {
+      console.log('\ncannot continue without this call succeeding');
+      process.exitCode = 1;
+      await client.close().catch(() => undefined);
+      process.exit(1);
+    }
+    return { isError: true, content: [{ type: 'text', text: message }], structuredContent: {} };
+  }
+};
+
 const transport = new StdioClientTransport({
   command: process.execPath,
   args: [resolve(root, 'bin/axure-mcp.mjs')],
@@ -65,7 +88,7 @@ for (const tool of tools) {
 
 // --- axure_list_pages -------------------------------------------------------
 const pagesStart = Date.now();
-const pages = await client.callTool({ name: 'axure_list_pages', arguments: {} });
+const pages = await call('axure_list_pages', {}, 'call axure_list_pages', { fatal: true });
 const pagesText = pages.content?.find((block) => block.type === 'text')?.text ?? '';
 const pageList = pages.structuredContent?.pages ?? [];
 check('axure_list_pages returns pages', pageList.length > 0, `${pageList.length} pages in ${Date.now() - pagesStart} ms`);
@@ -80,10 +103,7 @@ console.log(`\ntarget page: ${target.id} ${target.name} -> ${target.url}`);
 
 // --- axure_get_page_map -----------------------------------------------------
 const mapStart = Date.now();
-const map = await client.callTool({
-  name: 'axure_get_page_map',
-  arguments: { page: target.id, detail: 'standard', maxNodes: 1500, includeAccessibility: true },
-});
+const map = await call('axure_get_page_map', { page: target.id, detail: 'standard', maxNodes: 1500, includeAccessibility: true }, 'call axure_get_page_map');
 const mapText = map.content?.find((block) => block.type === 'text')?.text ?? '';
 writeFileSync(resolve(OUT, 'page-map.md'), mapText);
 const structured = map.structuredContent ?? {};
@@ -128,10 +148,7 @@ console.log(`\nwidgets chosen for the crop test: ${textNodes.map((node) => `${no
 
 // --- axure_get_visual: full page --------------------------------------------
 const fullStart = Date.now();
-const full = await client.callTool({
-  name: 'axure_get_visual',
-  arguments: { page: target.id, target: 'full-page', savePath: `full-${target.id}.png` },
-});
+const full = await call('axure_get_visual', { page: target.id, target: 'full-page', savePath: `full-${target.id}.png` }, 'call axure_get_visual');
 const fullImage = full.content?.find((block) => block.type === 'image');
 const fullSummary = full.structuredContent ?? {};
 check(
@@ -149,36 +166,30 @@ if (fullImage) writeFileSync(resolve(OUT, `full-${target.id}.png`), Buffer.from(
 // --- axure_get_visual: widget crop ------------------------------------------
 if (textNodes.length) {
   const cropStart = Date.now();
-  const crop = await client.callTool({
-    name: 'axure_get_visual',
-    arguments: {
+  const crop = await call('axure_get_visual', {
       page: target.id,
       target: 'widgets',
       widgetIds: textNodes.map((node) => node.id),
       pad: 12,
       savePath: `crop-${target.id}.png`,
-    },
-  });
+    }, 'call axure_get_visual');
   const cropImage = crop.content?.find((block) => block.type === 'image');
   const cropSummary = crop.structuredContent ?? {};
   check(
     'axure_get_visual widget crop returns a PNG plus geometry',
     !!cropImage && (cropSummary.widgets?.length ?? 0) === textNodes.length,
-    `region ${Math.round(cropSummary.clip?.width ?? 0)}x${Math.round(cropSummary.clip?.height ?? 0)} in ${Date.now() - cropStart} ms`,
+    `region ${Math.round(cropSummary.region?.width ?? 0)}x${Math.round(cropSummary.region?.height ?? 0)} in ${Date.now() - cropStart} ms`,
   );
   check(
     'widget crop is smaller than the canvas (a real crop)',
-    (cropSummary.clip?.width ?? 0) < 1920 && (cropSummary.clip?.height ?? 0) < 1080,
-    `${Math.round(cropSummary.clip?.width ?? 0)}x${Math.round(cropSummary.clip?.height ?? 0)}`,
+    (cropSummary.region?.width ?? 0) < 1920 && (cropSummary.region?.height ?? 0) < 1080,
+    `${Math.round(cropSummary.region?.width ?? 0)}x${Math.round(cropSummary.region?.height ?? 0)}`,
   );
   if (cropImage) writeFileSync(resolve(OUT, `crop-${target.id}.png`), Buffer.from(cropImage.data, 'base64'));
 }
 
 // --- axure_get_visual: viewport space geometry ------------------------------
-const viewportSpace = await client.callTool({
-  name: 'axure_get_page_map',
-  arguments: { page: target.id, space: 'viewport', detail: 'compact', maxNodes: 60 },
-});
+const viewportSpace = await call('axure_get_page_map', { page: target.id, space: 'viewport', detail: 'compact', maxNodes: 60 }, 'call axure_get_page_map');
 const vs = viewportSpace.structuredContent ?? {};
 check(
   'space=viewport returns viewport-relative coordinates and an on-screen flag',
@@ -187,7 +198,7 @@ check(
 );
 
 // --- error handling ---------------------------------------------------------
-const bad = await client.callTool({ name: 'axure_get_visual', arguments: { target: 'widgets', widgetIds: ['u999999'] } });
+const bad = await call('axure_get_visual', { target: 'widgets', widgetIds: ['u999999'] }, 'call axure_get_visual');
 const badText = bad.content?.find((block) => block.type === 'text')?.text ?? '';
 check('unknown widget id fails with a coded error', bad.isError === true && badText.includes('WIDGET_NOT_FOUND'), badText.split('\n')[1] ?? '');
 
@@ -196,10 +207,7 @@ check('unknown widget id fails with a coded error', bad.isError === true && badT
 // thousands of nodes and a node cap truncates rather than focuses.
 const dense = pageList.find((page) => /订单管理/.test(page.name) && !/一期/.test(page.name)) ?? pageList[0];
 const scopedStart = Date.now();
-const scoped = await client.callTool({
-  name: 'axure_get_page_map',
-  arguments: { page: dense.id, detail: 'compact', region: { x: 500, y: 350, width: 400, height: 40 }, maxNodes: 200 },
-});
+const scoped = await call('axure_get_page_map', { page: dense.id, detail: 'compact', region: { x: 500, y: 350, width: 400, height: 40 }, maxNodes: 200 }, 'call axure_get_page_map');
 const scopedData = scoped.structuredContent ?? {};
 const scopedFlat = [];
 const walkScoped = (nodes) => {
@@ -221,6 +229,87 @@ check(
   outside.length ? `${outside.length} out-of-region nodes, e.g. ${outside[0].id}@${outside[0].y}` : 'all kept nodes intersect',
 );
 
+// --- region semantics follow the requested space -----------------------------
+// Regression guard: the region was documented as page coordinates but tested against
+// viewport-adjusted node coordinates, so `space="viewport"` silently reinterpreted it.
+const viewportRegion = { x: 60, y: 60, width: 320, height: 220 };
+const vpScoped = await call('axure_get_page_map', { page: target.id, detail: 'compact', space: 'viewport', region: viewportRegion, maxNodes: 200 }, 'call axure_get_page_map');
+const vpData = vpScoped.structuredContent ?? {};
+const vpFlat = [];
+const walkVp = (nodes) => {
+  for (const node of nodes ?? []) {
+    vpFlat.push(node);
+    walkVp(node.children);
+  }
+};
+walkVp(vpData.outline ?? []);
+const vpOutside = vpFlat.filter(
+  (node) =>
+    !node.scoped &&
+    !(
+      node.x < viewportRegion.x + viewportRegion.width &&
+      node.x + node.width > viewportRegion.x &&
+      node.y < viewportRegion.y + viewportRegion.height &&
+      node.y + node.height > viewportRegion.y
+    ),
+);
+check(
+  'space=viewport interprets region in viewport coordinates',
+  vpData.space === 'viewport' && vpFlat.length > 0 && vpOutside.length === 0,
+  `${vpFlat.length} nodes, ${vpOutside.length} outside the viewport region` +
+    (vpOutside.length ? ` e.g. ${vpOutside[0].id}@${vpOutside[0].x},${vpOutside[0].y}` : ''),
+);
+
+// --- untrusted-content notice ------------------------------------------------
+const noticeStart = mapText.indexOf('\n');
+check(
+  'the untrusted-content notice precedes the outline',
+  mapText.startsWith('note:') && /untrusted data/.test(mapText.slice(0, 600)),
+  JSON.stringify(mapText.slice(0, 60)),
+);
+
+// --- response budget ---------------------------------------------------------
+// Regression guard: the character budget was only used to derive a per-node text allowance
+// with a floor, so a large page could return several times the nominal budget.
+const budget = Number.parseInt(process.env.AXURE_OUTLINE_CHAR_BUDGET ?? '48000', 10);
+const budgeted = await call('axure_get_page_map', { page: dense.id, detail: 'full', maxNodes: 5000 }, 'call axure_get_page_map');
+const budgetedText = budgeted.content?.find((block) => block.type === 'text')?.text ?? '';
+check(
+  'the response text respects the character budget',
+  budgetedText.length <= budget * 1.15,
+  `${budgetedText.length} chars for a ${budget} budget (dense page, detail=full, maxNodes=5000)`,
+);
+
+// --- degraded path for a text-only consumer ---------------------------------
+const noImage = await call('axure_get_visual', { page: target.id, target: 'full-page', includeImage: false }, 'call axure_get_visual');
+const noImageImage = noImage.content?.find((block) => block.type === 'image');
+const noImageData = noImage.structuredContent ?? {};
+check(
+  'includeImage=false suppresses the image block but keeps the geometry',
+  noImageImage === undefined && noImageData.image?.attached === false && noImageData.canvas?.width > 0,
+  `canvas=${noImageData.canvas?.width}x${noImageData.canvas?.height}, ${noImageData.image?.bytes} bytes on disk`,
+);
+
+// --- savePath confinement ----------------------------------------------------
+const escapedSave = await call('axure_get_visual', { page: target.id, target: 'viewport', savePath: '../../../../evil.png', includeImage: false }, 'call axure_get_visual');
+const escapedText = escapedSave.content?.find((block) => block.type === 'text')?.text ?? '';
+check(
+  'savePath cannot escape the screenshot directory',
+  /screenshot written to disk failed/i.test(escapedText) &&
+    /savePath must stay inside/i.test(escapedText) &&
+    escapedSave.structuredContent?.savedTo === undefined,
+  'traversal rejected, reported as a warning, capture still returned',
+);
+
+// --- error transparency ------------------------------------------------------
+const blocked = await call('axure_get_page_map', { page: 'http://169.254.169.254/' }, 'call axure_get_page_map');
+const blockedText = blocked.content?.find((block) => block.type === 'text')?.text ?? '';
+check(
+  'an out-of-boundary host is refused with a machine-readable code',
+  blocked.isError === true && blocked.structuredContent?.error?.code === 'PAGE_NOT_FOUND',
+  blockedText.split('\n').find((line) => line.startsWith('error:')) ?? '',
+);
+
 await client.close();
 
 const failed = results.filter((result) => !result.ok);
@@ -230,3 +319,5 @@ if (failed.length) {
   console.log('failed:', failed.map((result) => result.name).join(', '));
   process.exitCode = 1;
 }
+
+
