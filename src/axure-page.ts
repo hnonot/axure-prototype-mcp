@@ -605,6 +605,7 @@ function renderNode(node: OutlineNode, space: GeometrySpace, detail: PageViewReq
   const flags: string[] = [];
   if (!node.visible) flags.push('hidden');
   if (!node.onScreen) flags.push('off-canvas');
+  if (node.scoped) flags.push('ancestor-only');
   if (node.action) flags.push('clickable');
   if (node.stateCount !== undefined) flags.push(`states=${node.stateCount}`);
   if (node.state !== undefined) flags.push(`active=${node.state}`);
@@ -648,7 +649,8 @@ export function renderOutline(result: PageViewResult): string {
         : ''),
   );
   lines.push(
-    `format: <id> <kind>:<AxureType> @<x>,<y> <w>x<h> [name=] [hidden|off-canvas|clickable|states=n|active=n|image] ` +
+    `format: <id> <kind>:<AxureType> @<x>,<y> <w>x<h> [name=] ` +
+      `[hidden|off-canvas|ancestor-only|clickable|states=n|active=n|image] ` +
       `[text=""] [note=""] [fill= stroke= radius= ...]`,
   );
   if (result.warnings.length) {
@@ -675,6 +677,84 @@ export function renderOutline(result: PageViewResult): string {
     lines.push('```');
   }
   return lines.join('\n');
+}
+
+/**
+ * Keep only the parts of the outline the caller asked for.
+ *
+ * The match test is applied **per node**, and a surviving descendant keeps its ancestors
+ * connected. It is deliberately *not* inherited downward: a large container that overlaps
+ * the region (an 1891px-wide table, say) would otherwise drag every one of its far-away
+ * cells into the result, which defeats the point of scoping.
+ *
+ * A widget named in `widgetIds` is the one exception — its descendants are all kept, so
+ * "show me this panel" returns the panel's contents. Ancestors kept only for connectivity
+ * are marked `scoped`, so a caller can tell them from real matches.
+ */
+function applyScope(
+  nodes: OutlineNode[],
+  scope: { region?: PageViewRequest['region']; widgetIds?: string[]; onScreenOnly?: boolean },
+): { nodes: OutlineNode[]; matchedIds: Set<string> } {
+  const matchedIds = new Set<string>();
+  const seeds = new Set((scope.widgetIds ?? []).map((ref) => parseWidgetRef(ref).widgetId));
+  const region = scope.region;
+
+  const intersectsRegion = (node: OutlineNode): boolean => {
+    if (!region) return true;
+    return (
+      node.x < region.x + region.width &&
+      node.x + node.width > region.x &&
+      node.y < region.y + region.height &&
+      node.y + node.height > region.y
+    );
+  };
+
+  const visit = (node: OutlineNode, insideSeed: boolean): OutlineNode | null => {
+    const isSeed = seeds.has(node.id);
+    const descendSeed = insideSeed || isSeed;
+
+    const children: OutlineNode[] = [];
+    for (const child of node.children ?? []) {
+      const kept = visit(child, descendSeed);
+      if (kept) children.push(kept);
+    }
+
+    const isMatch =
+      (isSeed || descendSeed || intersectsRegion(node)) && (scope.onScreenOnly !== true || node.onScreen);
+
+    if (isMatch) {
+      matchedIds.add(node.id);
+      const copy: OutlineNode = { ...node };
+      if (children.length) copy.children = children;
+      else delete copy.children;
+      return copy;
+    }
+    // Kept only to keep the hierarchy connected to a surviving descendant.
+    if (children.length) {
+      const copy: OutlineNode = { ...node, children, scoped: true };
+      return copy;
+    }
+    return null;
+  };
+
+  const out: OutlineNode[] = [];
+  for (const node of nodes) {
+    const kept = visit(node, false);
+    if (kept) out.push(kept);
+  }
+  return { nodes: out, matchedIds };
+}
+
+/** Depth-first search for one widget by id. */
+function findNode(nodes: OutlineNode[], id: string): OutlineNode | undefined {
+  for (const node of nodes) {
+    if (node.id === id) return node;
+    if (node.children) {
+      const found = findNode(node.children, id);
+      if (found) return found;
+    }
+  }
+  return undefined;
 }
 
 /** Depth-first flatten used by tooling that wants a list instead of a tree. */
@@ -838,7 +918,26 @@ export async function extractPageView(
     if (node) normalized.push(node);
   }
 
-  const bounded = applyBudgets(normalized, request.maxNodes, stats, omitted);
+  // Scope first, then budget: a scoped call should spend its budget on the requested
+  // area rather than on trimming an already-deterministic set of unwanted nodes.
+  const isScoped = request.region !== undefined || (request.widgetIds?.length ?? 0) > 0 || request.onScreenOnly === true;
+  const scoped = isScoped
+    ? applyScope(normalized, {
+        region: request.region,
+        widgetIds: request.widgetIds,
+        onScreenOnly: request.onScreenOnly,
+      })
+    : { nodes: normalized, matchedIds: new Set<string>() };
+
+  if (request.widgetIds?.length) {
+    for (const id of request.widgetIds) {
+      if (!scoped.matchedIds.has(parseWidgetRef(id).widgetId) && !findNode(normalized, parseWidgetRef(id).widgetId)) {
+        warnings.push(`seed widget not found on this page: ${id}`);
+      }
+    }
+  }
+
+  const bounded = applyBudgets(scoped.nodes, request.maxNodes, stats, omitted);
   const recounted = collectStats(bounded, capture.totalWidgets, {
     scrollX: capture.scrollX,
     scrollY: capture.scrollY,
@@ -848,6 +947,17 @@ export async function extractPageView(
   recounted.omittedNodes = stats.omittedNodes;
   recounted.truncatedNodes = stats.truncatedNodes;
   recounted.widgets = capture.totalWidgets;
+
+  if (isScoped) {
+    warnings.push(
+      `scoped capture: ${recounted.nodes} of ${capture.totalWidgets} widgets match` +
+        (request.region
+          ? `; region ${request.region.x},${request.region.y} ${request.region.width}x${request.region.height}`
+          : '') +
+        (request.widgetIds?.length ? `; seed widgets ${request.widgetIds.join(', ')}` : '') +
+        '. Drop the scope to see the whole page.',
+    );
+  }
 
   if (recounted.offCanvasNodes > 0 && request.space === 'viewport') {
     warnings.push(
@@ -879,6 +989,16 @@ export async function extractPageView(
     stats: recounted,
     outline: bounded,
     omitted,
+    ...(isScoped
+      ? {
+          scope: {
+            region: request.region,
+            widgetIds: request.widgetIds,
+            onScreenOnly: request.onScreenOnly,
+            missingWidgets: request.widgetIds?.filter((id) => !findNode(normalized, parseWidgetRef(id).widgetId)),
+          },
+        }
+      : {}),
     notes: capture.notes,
     accessibility,
     warnings,

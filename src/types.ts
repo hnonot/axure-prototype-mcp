@@ -94,6 +94,8 @@ export interface OutlineNode extends Rect {
   stateCount?: number;
   /** Child nodes in DOM/source order. */
   children?: OutlineNode[];
+  /** Set on an ancestor retained only to keep the hierarchy connected to a scoped match. */
+  scoped?: boolean;
 }
 
 /** Aggregated statistics describing one page. */
@@ -148,6 +150,12 @@ export interface PageViewRequest {
   includeHidden: boolean;
   includeAccessibility: boolean;
   includeNotes: boolean;
+  /** Restrict the outline to one canvas rectangle, keeping partially-covered nodes. */
+  region?: { x: number; y: number; width: number; height: number };
+  /** Restrict the outline to these widgets plus their ancestors and descendants. */
+  widgetIds?: string[];
+  /** Drop nodes that lie outside the rendered viewport. */
+  onScreenOnly?: boolean;
   settleMs?: number;
   viewport?: { width: number; height: number };
 }
@@ -171,6 +179,14 @@ export interface PageViewResult {
   outline: OutlineNode[];
   /** Omitted node count per reason, when the outline was trimmed. */
   omitted: Record<string, number>;
+  /** Active scoping filters, echoed back so the caller can reason about coverage. */
+  scope?: {
+    region?: { x: number; y: number; width: number; height: number };
+    widgetIds?: string[];
+    onScreenOnly?: boolean;
+    /** Widgets named in `widgetIds` that do not exist on this page. */
+    missingWidgets?: string[];
+  };
   /** Page-level notes and annotations, when present. */
   notes?: Array<{ target: string; text: string }>;
   /** Playwright ARIA snapshot, offered only when explicitly requested. */

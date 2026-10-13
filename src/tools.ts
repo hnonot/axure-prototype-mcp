@@ -288,6 +288,31 @@ export function registerTools(server: McpServer, context: ToolContext): void {
               'useful roles, so it is off by default; enable it only to prove that claim or to compare against the parsed outline.',
           ),
         includeNotes: z.boolean().optional().describe('Include designer annotations/page notes attached to widgets (default true).'),
+        region: z
+          .object({
+            x: z.number(),
+            y: z.number(),
+            width: z.number().positive(),
+            height: z.number().positive(),
+          })
+          .optional()
+          .describe(
+            'Restrict the outline to one canvas rectangle (page coordinates). Essential for large prototypes: a dense ' +
+              'MES page can carry well over a thousand widgets and several thousand pixels of canvas. Nodes that only ' +
+              'partly overlap are kept, and ancestors stay in the tree so the shape is preserved.',
+          ),
+        widgetIds: z
+          .array(z.string())
+          .max(40)
+          .optional()
+          .describe(
+            'Restrict the outline to these widgets, plus their ancestors and all their descendants. Use it to expand one ' +
+              'area of an earlier scoped map, or to pull extra detail for a specific table or panel.',
+          ),
+        onScreenOnly: z
+          .boolean()
+          .optional()
+          .describe('Drop nodes that do not intersect the current viewport (default false). Useful to see only what a user sees.'),
         viewport: z
           .object({ width: z.number().int().min(320).max(4_000), height: z.number().int().min(240).max(4_000) })
           .optional()
@@ -312,6 +337,9 @@ export function registerTools(server: McpServer, context: ToolContext): void {
         includeHidden: args.includeHidden ?? false,
         includeAccessibility: args.includeAccessibility ?? false,
         includeNotes: args.includeNotes ?? true,
+        region: args.region,
+        widgetIds: args.widgetIds,
+        onScreenOnly: args.onScreenOnly,
         settleMs: args.settleMs,
         viewport: args.viewport,
       };
@@ -348,6 +376,7 @@ export function registerTools(server: McpServer, context: ToolContext): void {
             stats: captured.stats,
             outline: tree,
             omitted: captured.omitted,
+            scope: captured.scope,
             notes: request.includeNotes ? captured.notes : undefined,
             accessibility: captured.accessibility,
             warnings: captured.warnings,

@@ -191,6 +191,36 @@ const bad = await client.callTool({ name: 'axure_get_visual', arguments: { targe
 const badText = bad.content?.find((block) => block.type === 'text')?.text ?? '';
 check('unknown widget id fails with a coded error', bad.isError === true && badText.includes('WIDGET_NOT_FOUND'), badText.split('\n')[1] ?? '');
 
+// --- scoping on a dense page ------------------------------------------------
+// A dense MES page is the case that scoping exists for: without it the outline is
+// thousands of nodes and a node cap truncates rather than focuses.
+const dense = pageList.find((page) => /订单管理/.test(page.name) && !/一期/.test(page.name)) ?? pageList[0];
+const scopedStart = Date.now();
+const scoped = await client.callTool({
+  name: 'axure_get_page_map',
+  arguments: { page: dense.id, detail: 'compact', region: { x: 500, y: 350, width: 400, height: 40 }, maxNodes: 200 },
+});
+const scopedData = scoped.structuredContent ?? {};
+const scopedFlat = [];
+const walkScoped = (nodes) => {
+  for (const node of nodes ?? []) {
+    scopedFlat.push(node);
+    walkScoped(node.children);
+  }
+};
+walkScoped(scopedData.outline ?? []);
+const outside = scopedFlat.filter((node) => !node.scoped && (node.y >= 390 || node.y + node.height <= 350));
+check(
+  'region scope returns far fewer nodes than the whole page',
+  scopedData.stats?.nodes > 0 && scopedData.stats.nodes < 80 && scopedData.stats.widgets > 300,
+  `${scopedData.stats?.nodes} nodes of ${scopedData.stats?.widgets} widgets in ${Date.now() - scopedStart} ms`,
+);
+check(
+  'region scope only keeps nodes that intersect the region',
+  outside.length === 0,
+  outside.length ? `${outside.length} out-of-region nodes, e.g. ${outside[0].id}@${outside[0].y}` : 'all kept nodes intersect',
+);
+
 await client.close();
 
 const failed = results.filter((result) => !result.ok);

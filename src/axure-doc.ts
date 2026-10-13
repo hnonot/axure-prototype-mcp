@@ -117,7 +117,14 @@ export function renderSitemap(result: SitemapResult): string {
   lines.push('format: <pageId>  <page name>  -> <relative url>');
   lines.push('');
 
-  // Rebuild the tree from the flat page and folder projections.
+  if (result.pageCount === 0) {
+    lines.push('(no page matches the filter)');
+    return lines.join('\n');
+  }
+
+  // Rebuild the tree from the flat page and folder projections. Folders with no matching
+  // page are reported with a count rather than left bare, which would otherwise read as
+  // "this folder is empty" when a filter simply excluded its pages.
   interface TreeNode {
     name: string;
     children: TreeNode[];
@@ -136,19 +143,22 @@ export function renderSitemap(result: SitemapResult): string {
     }
     return cursor;
   };
-  for (const folder of result.folders) ensure(folder.path);
-  for (const page of result.pages) {
-    const parent = ensure(page.path);
-    parent.children.push({ name: page.name, children: [], page });
-  }
+  for (const page of result.pages) ensure(page.path).children.push({ name: page.name, children: [], page });
+
+  const countPages = (node: TreeNode): number =>
+    (node.page ? 1 : 0) + node.children.reduce((sum, child) => sum + countPages(child), 0);
 
   const render = (node: TreeNode, depth: number): void => {
     if (node.page) {
       lines.push(`${'  '.repeat(depth)}${node.page.id}  ${node.page.name}  -> ${node.page.url}`);
-    } else {
-      if (node.name) lines.push(`${'  '.repeat(depth)}[folder] ${node.name}`);
-      for (const child of node.children) render(child, node.name ? depth + 1 : depth);
+      return;
     }
+    if (node.name) {
+      const total = countPages(node);
+      const count = total === 0 ? ' (0 pages here; filtered out or a folder-only node)' : ` (${total})`;
+      lines.push(`${'  '.repeat(depth)}[folder] ${node.name}${count}`);
+    }
+    for (const child of node.children) render(child, node.name ? depth + 1 : depth);
   };
   for (const child of root.children) render(child, 0);
 

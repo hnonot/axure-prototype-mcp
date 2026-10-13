@@ -25,6 +25,7 @@
     "test": "node scripts/unittest.mjs",
     "test:e2e": "node scripts/selftest.mjs",
     "test:http": "node scripts/httptest.mjs",
+    "test:all": "npm test && npm run test:e2e && npm run test:http",
     "install-browser": "playwright install chromium"
   },
   "dependencies": {
