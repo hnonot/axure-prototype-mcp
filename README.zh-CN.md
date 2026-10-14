@@ -1,54 +1,203 @@
-# Axure 原型 MCP
+# Axure Prototype MCP
 
-一个独立的 [模型上下文协议](https://modelcontextprotocol.io) 服务器，让任何 MCP 智能体都能以**结构化、空间化和视觉化**的方式访问以分享链接形式发布的 Axure 原型。
-
-它刻意独立于任何宿主框架：没有私有 API，没有框架 SDK，只需一次 `npm install` 和一次 `node bin/axure-mcp.mjs`。DSH 像连接任何其他 MCP 客户端一样通过 stdio 连接它，因此升级或更换框架都不会破坏它。
+一个独立的 [Model Context Protocol](https://modelcontextprotocol.io) 服务，让任何兼容 MCP 的
+Host 都能获取 Axure 原型的**结构、空间、视觉与交互**信息（原型以 share link 方式发布）。
 
 ```
-structure + space + visual, in one agent turn:
+针对同一页面，每次调用同时给出结构 / 空间 / 视觉 / 交互：
 
-  axure_list_pages      -> what pages exist          (cheap discovery)
-  axure_get_page_map    -> what is where, plus text  (the workhorse)
-  axure_get_visual      -> the matching pixels       (vision, coordinate-aligned)
+  axure_list_pages         -> 有哪些页面             （廉价发现）
+  axure_get_page_map       -> 什么在哪里、文字是什么 （主力工具）
+  axure_get_visual         -> 对应像素               （与坐标对齐）
+  axure_get_interactions   -> 哪些元素响应输入       （事实与推断分开标注）
 ```
+
+不依赖任何特定 Host、模型或客户端库：一次 `npm install`、一次
+`node bin/axure-mcp.mjs`，即可通过 **stdio** 或 **Streamable HTTP** 提供标准 MCP 服务。
+
+英文版见 [README.md](README.md)。
+
+- [交互能力的验证状态](#交互能力的验证状态)
+- [架构](#架构)
+- [工具](#工具)
+  - [`axure_list_pages`](#axure_list_pages)
+  - [`axure_get_page_map`](#axure_get_page_map)
+  - [`axure_get_visual`](#axure_get_visual)
+  - [`axure_get_interactions`](#axure_get_interactions)
+  - [失败与错误码](#失败与错误码)
+- [安装与运行](#安装与运行)
+- [配置](#配置)
+- [接入 Host](#接入-host)
+- [信任与安全边界](#信任与安全边界)
+- [模型兼容与降级](#模型兼容与降级)
+- [测试](#测试)
+- [已知限制](#已知限制)
+- [后续计划](#后续计划)
+- [版本历史](#版本历史)
 
 ---
 
-## 为什么这样设计
+## 验证状态
 
-任务是让智能体看到一个 Axure 页面，而最显而易见的方法——读取无障碍树并截图——在编写任何代码之前，先针对一个真实部署（`https://axure.example.com/ProjectB`，279 个页面）进行了测量。两个发现改变了设计：
+四个工具均已实现，并已对**真实 Axure 部署**（`https://axure.example.com/ProjectB`，Axure 10）验证通过。
+以下数字均为实际运行输出；交互数据结论在工具存在之前已由独立探针交叉验证。
 
-**1. Axure 页面的无障碍树几乎毫无用处。** 每个控件都表现为匿名的 `paragraph` 或 `img`——没有角色，没有名称，没有嵌套，没有位置。在参考页面上，整个 ARIA 快照是 115 行 `- paragraph: <text>` 和 `- img`。Axure 没有给它的控件任何 ARIA 语义，因此一个以 ARIA 为先的服务器几乎什么都返回不了。
+| 套件 | 命令 | 结果 |
+|---|---|---|
+| 构建 | `npm run build` | 通过，无告警 |
+| 单元 | `npm test` | 30/30 |
+| 安全 | `npm run test:security` | 14/14 |
+| 浏览器边界 | `npm run test:inpage` | 6/6 |
+| 交互逻辑 + 渲染 | `npm run test:interaction`（前半） | 34/34 |
+| 页内读取器 | `npm run test:interaction`（后半） | 20/20 |
+| 端到端（真实原型、真实 stdio） | `npm run test:e2e` | 35/35 |
+| HTTP 传输 | `npm run test:http` | 8/8 |
 
-**2. DOM 和 Axure 自己的运行时非常丰富。** 每个控件都是 `<div id="u<number>">`，它的种类作为 HTML 注释紧挨在它前面输出（`<!-- 会员中心 (Dynamic Panel) -->`），而 `window.$axure.getRectAndStyleById(id)` 能为参考页面上 **113 个控件中的 113 个**解析出作者设定的几何、填充、边框、圆角半径、不透明度和文本。这就是本服务器读取的真相来源。
+参考原型上的实测交互覆盖：
 
-因此，大纲是从 Axure 自己的标记和运行时中解析出来的——一个轻量的、由证据驱动的解析器，而不是对布局的重新实现。没有 OCR，没有图像理解，也没有交互，因为回答“这是什么页面，所有东西在哪里”并不需要这些。
+| 页面 | 控件 | 有交互控件 | case | 事件 | 动作 |
+|---|---|---|---|---|---|
+| 订单管理 `w2yv7l` | 1119 | 6 | 12 | `onClick` | `setFunction` ×12 |
+| 版本更新记录 `6k5oyo` | 113 | 18 | 18 | `onClick` | `setPanelState` ×8、`linkWindow` ×10、`setFunction` ×10 |
+| 工单管理 `b8yrp4` | 833 | 6 | 12 | `onClick` | `setFunction` ×12 |
 
-无障碍功能仍然可以通过 `includeAccessibility: true` 使用，它主要用于*证明*上述论断，而不是提取信息。
+**未验证的部分**——明确写出，而不是让人去猜：
+
+- **只观察到 `onClick`。** 悬停、输入、选择、键盘、页面加载等触发类型**有归一化规则，
+  但没有实测样本**，因为该原型的全部交互都是点击。因此这些类型**未经验证**。
+- **`linkWindow` 的目标页无法确定。** 实测 payload 的 `target` 只有 `targetType: "page"`，
+  没有 `pageId`，所以链接动作只报 `Open Link`，**不编造目标页**。这是能力边界，不是待掩盖的缺陷。
+- **`observed` 等级不会产生记录。** 本工具**不触发交互**（触发会改变页面状态，属另一套风险），
+  因此该等级有完整的数据结构与构造器，但**没有实测样本**。
+- **其他 Axure 版本未测试。** 全部结论来自这一个 Axure 10 部署。
+
+---
+
+## 架构
+
+四层，依赖单向，不存在反向依赖，因此一层的改动不会悄悄变成另一层的职责。
+
+```
+                 ┌──────────────────────────────────────────┐
+   host  ──────► │ mcp/         协议与工具定义               │  schema、结果组装
+                 └───────────────────┬──────────────────────┘
+                                     ▼
+                 ┌──────────────────────────────────────────┐
+                 │ service.ts   编排与策略                   │  导航、缓存、画布
+                 └───────────────────┬──────────────────────┘  1:1、预算
+                                     ▼
+                 ┌──────────────────────────────────────────┐
+                 │ axure/       Axure 领域逻辑               │  提取、站点地图、
+                 └───────────────────┬──────────────────────┘  交互分析、渲染
+                                     ▼
+                 ┌──────────────────────────────────────────┐
+                 │ playwright/  浏览器适配层                 │  唯一 import
+                 └──────────────────────────────────────────┘  playwright 处
+        横切：config.ts · errors.ts · logger.ts · security.ts · types.ts
+```
+
+| 路径 | 职责 | **不**做 |
+|---|---|---|
+| `src/mcp/` | 工具 schema、结果组装、注册 | 不碰文件系统与网络 |
+| `src/service.ts` | 把请求变成浏览器操作；持有策略 | 不认识 MCP、模型或客户端 |
+| `src/axure/` | Axure 提取、作用域、交互分析、渲染 | 不 import `playwright`，只接收 `FrameHandle` |
+| `src/playwright/` | 持有 Chromium、隔离会话、强制执行边界 | 不知道 Axure 页面是什么 |
+| `src/security.ts` | 唯一决定「浏览器能去哪、能写哪」的地方 | |
+| `src/config.ts` | 读取并校验环境变量，快速失败 | 不含功能逻辑 |
+
+`src/axure/` 内部，交互功能按**「不依赖浏览器可验证的部分」**拆分——这也是在构建工具链
+不可用时仍让它可测试的原因：
+
+| 文件 | 作用 | 由谁测试 |
+|---|---|---|
+| `interaction.ts` | 纯推理：证据等级、触发器/动作归一化、聚合 | `test-interaction.mjs`（固定用例） |
+| `interaction-source.ts` | 页内读取器，以纯 JS 字符串形式存放 | `test-interaction-source.mjs`（编译并在合成模型上运行） |
+| `interaction-analyzer.ts` | 按**来源**决定每条记录的证据等级 | `test-interaction.mjs` |
+| `interaction-render.ts` | 文本输出，事实与推断分区呈现 | `test-interaction.mjs` |
+
+两条值得点名的结论，也是分层的收益所在：
+
+- **`src/axure/` 从不 import Playwright。** 它只接收 `FrameHandle`
+  （`run` / `title` / `bodyBox` / `ariaSnapshot`），因此领域逻辑可以用假对象单测，
+  且不会因 Playwright 变动而失效。
+- **`src/mcp/` 不做任何 IO。** 所有写盘与导航都在它下面发生，因此工具 handler
+  短到一眼能读完。
+
+### 为什么大纲是解析出来的，而不是从 ARIA 推导
+
+在动手写代码之前，先对真实 Axure 10 部署做了实测：
+
+**Axure 页面的可访问性树几乎没有信息量。** 每个控件都表现为匿名的 `paragraph` 或 `img`——
+没有 role、没有 name、没有层级、没有位置。整页的 ARIA 快照是 115 行
+`- paragraph: <文本>` 与 `- img`。
+
+**而 DOM 与 Axure 自身的运行时非常丰富。** 每个控件是 `<div id="u<数字>">`，它的种类写在
+紧邻其前的 HTML 注释里（`<!-- 会员中心 (Dynamic Panel) -->`），且
+`window.$axure.getRectAndStyleById(id)` 在参考页上能为 **113/113** 个控件给出编辑态几何、
+填充、边框、圆角、透明度与文本。
+
+因此大纲解析自 Axure 自身的标记与运行时。`includeAccessibility: true` 仍会返回 ARIA 快照，
+主要用途是**证明**上面这一点，而不是从中提取信息。
+
+同理，**交互识别读取的是项目模型，而不是外观**：DOM 只呈现交互的*结果*，而一个
+`cursor: pointer` 的控件未必真的绑定了交互，因此外观无法构成事实。
+
+### 交互数据究竟在哪里（实测）
+
+由 16 个针对真实部署的探针确定，期间**推翻了三个初始假设**：
+
+| 初始假设 | 实测事实 |
+|---|---|
+| `$axure.document` 可读 | 内容框架里的 `$axure` 是**函数**，没有 `.document`；`$axure.internal` 不暴露任何键 |
+| `$axure` 上有可用的绑定表 | 不存在可用的 path/id 解析函数 |
+| 仅凭 DOM 外观即可判定 | 只能得到推断，且与模型数据重复——因此被限制在独立的 `inferred` 通道 |
+
+可行路径：`files/<页面>/data.js` 虽被混淆，但它把**真实属性名**传给了
+`$axure.loadCurrentPage(model)`。用 `addInitScript` 在该调用发生前挂钩，即可拿到完整解码模型：
+
+| 内容 | 位置 |
+|---|---|
+| 页面控件树 | `model.page.diagram.objects`，子节点在 `objs` |
+| 母版 | `model.masters.<hash>.diagram.objects`，子节点在 `objs` **与** `diagrams[].objects` |
+| 控件 | `{ id: <32 位 hash>, label, friendlyType, interactionMap? }` |
+| 交互 | `interactionMap[event].cases[].actions[]` |
+
+页面地图以 `u<N>` 寻址控件，而模型以 hash 为键，因此需要**两条**桥，
+而且**任何一条单独都不够**：
+
+1. `model.objectPaths[hash].scriptId` —— 页面级控件（实测 **1119/1119** 精确）。
+2. 控件自身 `scriptIds[0]` —— 母版内控件，母版**完全没有** `objectPaths`（实测 **18/18** 精确）。
+
+一个页面级按钮去切换**母版内**的面板时，两条桥必须同时使用，这就是读取器要合并它们的原因。
+
+### 关于 MCP Resources 与 Prompts
+
+**有意不实现。** 四个工具已覆盖「发现 → 读取 → 看 → 交互」全过程。Resources 适合可订阅的
+长期对象，而原型页面是即取即用的快照；Prompts 面向人工触发的工作流，而本服务的消费者是
+Agent。引入它们只会扩大未验证的代码面而不增加能力。若出现明确需求再重新评估。
 
 ---
 
 ## 工具
 
-三个工具，围绕一个观察构建：分析页面的智能体需要**在同一时刻、针对同一页面**获得结构、空间和视觉。将它们拆分成单独的 `get_structure` / `get_bounding_boxes` / `screenshot` 调用会使浏览器工作量增加两倍，迫使模型在多个负载之间重新关联坐标，并把每一个布局问题变成一场多次调用的舞蹈。
+四个工具均为只读、幂等，且每个结果都以「原型内容是不可信数据」的声明开头。
 
 ### `axure_list_pages`
 
-在分享外壳启动后，从 Axure 自己的解码文档模型（`$axure.document.sitemap`）读取项目站点地图。返回一个文件夹树，包含每个页面的 id 和 URL，缓存五分钟。
+从 Axure 自身解码后的文档模型（`$axure.document.sitemap`）读取站点地图，缓存 5 分钟。
 
 | 参数 | 类型 | 含义 |
 |---|---|---|
-| `refresh` | boolean | 绕过缓存并重新读取项目 |
-| `filter` | string | 对页面名称/路径进行不区分大小写的子串匹配 |
+| `refresh` | boolean | 忽略缓存并重新读取项目 |
+| `filter` | string（≤256） | 对页面名与文件夹路径做大小写不敏感的子串过滤 |
 
 ### `axure_get_page_map`
 
-主力工具。返回一个扁平的、按顺序的、缩进的大纲，其中每个节点都带有它的 id、种类、作者设定的几何信息以及它自己的文本。
+主力工具：**一次调用**同时给出某页的结构、几何与注释。
 
 ```
 u1 shape:Group @0,0 1920x1080
-  u2 shape:Rectangle @0,0 1920x1080 text="`" [fill=#f0f2f5]
-  u3 shape:Rectangle @0,0 200x1080 [fill=#001529]
+  u2 shape:Rectangle @0,0 1920x1080 text="`"
 u4 dynamic-panel:Dynamic Panel @0,218 200x56 name="会员中心" states=2,active=0
   u5 shape:Rectangle @0,218 200x56 clickable text="库存管理"
 u57 table:Table @222,95 1662x890
@@ -57,36 +206,113 @@ u57 table:Table @222,95 1662x890
 
 | 参数 | 类型 | 含义 |
 |---|---|---|
-| `page` | string | 页面 id、页面名称、项目相对路径或绝对 URL |
-| `space` | `page` \| `viewport` | 绝对画布坐标，或视口相对坐标加一个 `onScreen` 标志 |
-| `detail` | `compact` \| `standard` \| `full` | `standard`（默认）添加填充/描边/半径/不透明度；`full` 添加排版和内边距 |
-| `maxNodes` | number | 节点上限，默认 1200；当它裁剪时，`stats` 行列出省略原因 |
-| `region` | `{x,y,width,height}` | 限制到一个画布矩形——对密集页面至关重要 |
-| `widgetIds` | string[] | 限制为这些控件加上祖先和后代 |
-| `onScreenOnly` | boolean | 丢弃当前视口之外的节点 |
-| `includeHidden` | boolean | 包含动态面板状态未激活的控件 |
-| `includeAccessibility` | boolean | 追加原始 ARIA 快照以供比较 |
-| `includeNotes` | boolean | 设计者注释和页面笔记（默认 true） |
+| `page` | string（≤2048） | 页面 id、页面名、项目内相对路径，或部署范围内的 URL |
+| `space` | `page` \| `viewport` | 画布坐标（默认）或视口相对坐标并附带 `onScreen` |
+| `detail` | `compact` \| `standard` \| `full` | `standard`（默认）增加填充/描边/圆角/透明度；`full` 再增加字体与内边距 |
+| `region` | `{x,y,width,height}` | 限定到一个矩形，**与 `space` 同一坐标系** |
+| `widgetIds` | string[]（≤40，每个 ≤128） | 这些控件及其祖先与全部后代 |
+| `onScreenOnly` | boolean | 丢弃不在当前视口内的节点 |
+| `maxNodes` | 20–5000 | 节点上限，默认 `AXURE_MAX_OUTLINE_NODES` |
+| `includeHidden` | boolean | 保留动态面板非活动状态的控件 |
+| `includeAccessibility` | boolean | 追加 ARIA 快照，上限为响应预算的三分之一 |
+| `includeNotes` | boolean | 设计者注释与页面备注（默认 true） |
 | `viewport`、`settleMs` | | 渲染控制 |
 
 ### `axure_get_visual`
 
-返回 PNG 像素**以及所捕获内容的精确几何信息**，因此图像始终与你可以对照地图对齐的坐标配对。
+返回像素**以及被截取内容的精确几何**，因此图像始终能与页面地图的坐标对齐。
 
 | 参数 | 类型 | 含义 |
 |---|---|---|
 | `page` | string | 同上 |
-| `target` | `viewport` \| `full-page` \| `widgets` \| `none` | 捕获什么；`none` 仅返回几何信息 |
-| `widgetIds` | string[] | 配合 `target: "widgets"`，裁剪到这些控件的并集并报告每一个 |
-| `pad` | number | 控件裁剪周围的填充 |
-| `savePath` | string | 同时将 PNG 写入磁盘，供程序化消费者使用 |
-| `space` | `page` \| `viewport` | 返回几何信息的坐标空间 |
+| `target` | `viewport` \| `full-page` \| `widgets` \| `none` | 截取内容；`none` 只返回几何 |
+| `widgetIds` | string[] | `target: "widgets"` 时按这些控件的并集裁剪 |
+| `includeImage` | boolean | 是否附加 PNG 图像块（默认 true） |
+| `savePath` | string（≤512） | 同时把 PNG 写入 `AXURE_SCREENSHOT_DIR` 之内 |
+| `pad` | 0–200 | 裁剪时的外边距 |
+| `space` | `page` \| `viewport` | 返回几何的坐标系 |
+| `viewport`、`settleMs` | | 渲染控制 |
+| `scale` | 1–3 | **无效果**，仅为兼容保留；请用 `AXURE_DEVICE_SCALE_FACTOR` |
 
-PNG 作为标准 MCP `image` 内容块返回。具备视觉能力的模型接收像素；纯文本模型接收尺寸和几何摘要，而不是原始数据。
+### `axure_get_interactions`
 
-### 坐标与缩放
+报告页面中哪些控件响应输入、各自做什么。触发条件与动作读取自项目模型，
+**不从外观推断**。
 
-Axure 的分享播放器会**将线框画布缩小**以适应可用框架。一个 1920×1080 的原型在 1440×900 的视口中捕获，会静默地产生一张 1440×900 的图像，文字缩小，控件矩形不再与作者设定的坐标对齐。为消除这一类不匹配，本服务器在加载后测量画布，并放大视口直到它以 1:1 渲染，同时在一个 `warning` 中报告它这样做了。因此 `full-page` 返回真正的 1920×1080 画布。
+| 参数 | 类型 | 含义 |
+|---|---|---|
+| `page` | string | 同上 |
+| `includeInferred` | boolean | 是否包含 `inferred` 推断（默认 true） |
+| `maxWidgets` | 1–2000 | 读取模型条目的上限（默认 400） |
+| `viewport` | object | 渲染控制 |
+
+`structuredContent`：`{ ok, page, stats, interactions[], gaps[], warnings[] }`
+
+#### 证据模型（本工具的核心）
+
+每条记录都标明**实际掌握了多少**。本次迭代要求「不得把猜测当作确定结果」，
+因此证据等级**随数据一起传递**，消费者可以机械地按它过滤：
+
+| `confidence` | 含义 | 是否带动作 |
+|---|---|---|
+| `declared` | 项目模型声明了该交互。**事实。** | 是，含条件与分支 |
+| `observed` | 实际触发了该交互，这是观察到的变化。**事实**，但只覆盖实际走到的那个分支。 | 是，仅该分支 |
+| `inferred` | 控件**看起来**可交互（手型光标、表单元素、可聚焦、ARIA role）。**推断。** | **否**，永远没有 |
+
+`inferred` 记录在结构上就不可能带动作：构造它的函数**没有任何接受动作列表的参数**，
+因此后续修改即使忘记这条规则也无法把动作附加上去。每条 `inferred` 都在
+`inferredReason` 中说明推断依据。
+
+若某个来源读不到，结果会在 `gaps` 中说明，而不是返回一个空的列表。
+`declared: 0` **且存在** gap 表示「读不到」；`declared: 0` 且**没有** gap 表示
+「模型可读且确实没有声明交互」。响应文本会明确写出属于哪一种——把二者混为一谈，
+正是本功能要避免的捏造。
+
+```
+stats: 12 of 113 widgets have interaction information; 9 declared, 0 observed, 3 inferred; 14 branches
+actions: set-panel-state=4 navigate=2 show=3 hide=1 wait=1
+
+## declared interactions (facts from the project model)
+  p1#u5 <click> "库存管理"
+    Case 1 if [[This.text]] equals "x" -> set panel state(widget u4 state=1) ; wait(300ms)
+
+## inferred interactivity (guesses — no actions known)
+  p1#u47 <click> — CSS cursor is pointer, which suggests it is meant to be clicked
+```
+
+#### 本工具**不**做的事
+
+它**不点击、不输入、不触发任何交互**。触发交互会改变页面状态，那是另一种能力、
+另一套风险画像，本版本未启用。因此 `observed` 记录通常不会出现；保留该等级是为了让
+将来增加「触发式采集」成为**增量改动**，而不是 schema 破坏性变更。
+
+### 失败与错误码
+
+失败以 `isError: true` 返回，且**文本与 `structuredContent.error` 中带有同一个稳定错误码**：
+
+```
+error: WIDGET_NOT_FOUND
+message: none of the requested widgets exist on this page: u999999
+hint: Call axure_get_page_map for this page first and use the ids from its outline.
+retryable: false
+```
+
+| 错误码 | 含义 | 类别 |
+|---|---|---|
+| `CONFIG_INVALID` | 环境配置非法，服务拒绝启动 | 运维 |
+| `BROWSER_UNAVAILABLE` | Chromium 或上下文无法创建 | 基础设施 |
+| `NAVIGATION_FAILED` | 页面无法加载 | 基础设施 |
+| `NAVIGATION_BLOCKED` | 目标主机在部署范围之外，被策略拒绝 | 领域 |
+| `PAGE_NOT_FOUND` | 页面引用不是本原型中的页面 | 领域 |
+| `NOT_AXURE_PROJECT` | URL 可加载但未暴露 Axure 文档 | 领域 |
+| `NO_CONTENT_FRAME` | 页面已加载但没有 Axure 控件框架 | 基础设施 |
+| `RENDER_FAILED` | 页内提取失败 | 基础设施 |
+| `OPERATION_TIMEOUT` | 页内操作超过 `AXURE_OPERATION_TIMEOUT_MS` | 基础设施 |
+| `WIDGET_NOT_FOUND` | 指定控件在该页不存在 | 领域 |
+| `SCREENSHOT_FAILED` | 截图本身失败 | 基础设施 |
+| `WRITE_FAILED` | `savePath` 被拒绝或写入失败 | 领域 / 基础设施 |
+| `INVALID_ARGUMENT` | 参数内部不一致 | 领域 |
+| `INTERNAL` | 未预期的状况 | — |
 
 ---
 
@@ -94,44 +320,68 @@ Axure 的分享播放器会**将线框画布缩小**以适应可用框架。一�
 
 ```bash
 npm install
-npx playwright install chromium     # once
+npx playwright install chromium     # 仅需一次
 npm run build
 
-node bin/axure-mcp.mjs              # stdio  (default; what DSH uses)
-node bin/axure-mcp.mjs --http --port 3333   # streamable HTTP at /mcp
-
-# optional: load configuration from a file instead of the shell environment
-node --env-file=.env bin/axure-mcp.mjs
+node bin/axure-mcp.mjs                          # stdio（默认）
+node bin/axure-mcp.mjs --http                   # Streamable HTTP，127.0.0.1:3333
+node bin/axure-mcp.mjs --help                   # 完整参数与环境变量说明
+node --env-file=.env bin/axure-mcp.mjs          # 从文件读取配置
 ```
 
-`.env.example` 列出了每个变量及其默认值。没有任何东西会隐式加载它——请传递 `--env-file`，或者在启动服务器的环境中导出这些变量。服务器在完全没有配置的情况下也能启动，并默认使用参考部署。
+配置非法时会在**启动时一次性**报告全部问题：
 
-### 配置
+```
+[axure-mcp] error: invalid configuration (2 problems):
+  - AXURE_URL: not a valid absolute URL: "http://"
+  - AXURE_VIEWPORT_WIDTH: 99999999 is outside the allowed range 320..4000
+```
 
-全部可选；`AXURE_URL` 默认为 `https://axure.example.com/ProjectB`。
-
-| 变量 | 默认值 | 含义 |
-|---|---|---|
-| `AXURE_URL` | `https://axure.example.com/ProjectB` | 项目分享 URL；源和项目路径从中拆分 |
-| `AXURE_HEADLESS` | `true` | 以无头模式运行 Chromium |
-| `AXURE_VIEWPORT_WIDTH` / `_HEIGHT` | `1440` / `900` | 画布适配前的初始视口 |
-| `AXURE_DEVICE_SCALE_FACTOR` | `1` | 设备像素比；在上下文创建时固定，因此更改需重启 |
-| `AXURE_NAV_TIMEOUT_MS` | `60000` | 导航超时 |
-| `AXURE_SETTLE_MS` | `4000` | `load` 之后的额外等待，用于 Axure 自己的引导 |
-| `AXURE_MAX_OUTLINE_NODES` | `1200` | 默认节点上限 |
-| `AXURE_OUTLINE_CHAR_BUDGET` | `48000` | 驱动每节点文本裁剪的预算 |
-| `AXURE_BROWSER_IDLE_MS` | `300000` | 空闲这么多时间后关闭池化浏览器 |
-| `AXURE_NO_PROXY` | 内部主机 | 必须绕过环境 HTTP 代理的主机 |
-| `AXURE_SCREENSHOT_DIR` | `.axure-mcp/shots` | `savePath` 的基础目录 |
-| `AXURE_DEBUG` | 未设置 | 设为 `1` 以输出详细 stderr 日志 |
-
-**代理说明。** 内部 Axure 主机通常无法通过公司 `HTTP_PROXY` 访问。服务器将 `AXURE_NO_PROXY` 同时应用于 Chromium（`--proxy-bypass-list`）和它自己的 HTTP 调用，因此它在一个为注册表访问导出了代理的 shell 中也能工作。
+`.env.example` 列出了全部变量及其默认值。**不会**隐式加载 `.env`，请用 `--env-file`
+或直接导出环境变量。
 
 ---
 
-## DSH 集成
+## 配置
 
-该服务器作为一个仅配置的 DSH bundle 接入，它插入随附的 `@deepseek-ai/dsh-mcp-client`。它不包含任何 DSH 代码和任何私有 API，因此同一个二进制文件可以继续与任何其他 MCP 客户端一起工作。
+| 变量 | 默认值 | 含义 |
+|---|---|---|
+| `AXURE_URL` | `https://axure.example.com/ProjectB` | 项目 share URL，origin 与项目路径从中拆分 |
+| `AXURE_ALLOWED_HOSTS` | *（空）* | 额外允许浏览器访问的主机，逗号分隔 |
+| `AXURE_HEADLESS` | `true` | 是否无头运行 Chromium |
+| `AXURE_VIEWPORT_WIDTH` / `_HEIGHT` | `1440` / `900` | 初始视口（320–4000 / 240–4000） |
+| `AXURE_DEVICE_SCALE_FACTOR` | `1` | 设备像素比（1–3），每个浏览器上下文固定 |
+| `AXURE_MAX_CAPTURE_VIEWPORT_WIDTH` / `_HEIGHT` | `3840` / `2160` | 画布 1:1 适配时视口的上限 |
+| `AXURE_NAV_TIMEOUT_MS` | `60000` | 导航超时 |
+| `AXURE_OPERATION_TIMEOUT_MS` | `20000` | 每次页内操作的超时 |
+| `AXURE_SETTLE_MS` | `4000` | `load` 之后的额外等待，留给 Axure 自身初始化 |
+| `AXURE_OUTLINE_CHAR_BUDGET` | `48000` | 响应文本的**硬**字符预算 |
+| `AXURE_MAX_OUTLINE_NODES` | `1200` | 默认节点上限 |
+| `AXURE_MAX_WIDGET_IDS` | `40` | 单次调用的控件 id 上限 |
+| `AXURE_MAX_PAGES` | `500` | 单次列出的页面上限 |
+| `AXURE_BROWSER_IDLE_MS` | `300000` | 空闲多久后关闭池化浏览器 |
+| `AXURE_NO_PROXY` | 内网主机 | 必须绕过代理的主机 |
+| `AXURE_SCREENSHOT_DIR` | `.axure-mcp/shots` | `savePath` 的基准目录 |
+| `AXURE_LOG_LEVEL` | `info` | `debug` / `info` / `warn` / `error`；始终输出到 stderr |
+| `AXURE_HTTP_PORT` / `AXURE_HTTP_HOST` | `3333` / `127.0.0.1` | HTTP 传输绑定 |
+| `AXURE_HTTP_TOKEN` | *（未设）* | 绑定非回环地址时**必需**；客户端发送 `Authorization: Bearer <token>` |
+
+**代理说明。** 内网 Axure 主机通常无法穿过企业 `HTTP_PROXY`。`AXURE_NO_PROXY` 同时作用于
+Chromium（`--proxy-bypass-list`）与服务自身的 HTTP 调用，因此在导出了代理的 shell 中也能工作。
+
+**画布 1:1 适配。** Axure 播放器会把线框画布**缩放**以适配可用框架，因此 1920×1080 的原型
+在 1440×900 视口下会静默产出 1440×900 的图，文字被压小，控件矩形也不再与编辑态坐标一致。
+服务会在加载后测量画布并把视口放大到 1:1，并在 `warnings` 中说明它这样做了。
+显式传入 `viewport` 可固定尺寸；此时若画布大于实际截取范围，服务会给出警告。
+
+---
+
+## 接入 Host
+
+### DSH
+
+一个**纯配置** bundle 插入 DSH 已随附的 `@deepseek-ai/dsh-mcp-client`。它不含任何 DSH 代码
+或私有 API，因此同一二进制在任何其他客户端上同样可用。
 
 ```yaml
 # axure-mcp-dsh-bundle/cordis.patch.yml
@@ -147,24 +397,23 @@ node --env-file=.env bin/axure-mcp.mjs
         env:
           AXURE_URL: https://axure.example.com/ProjectB
           NO_PROXY: axure.example.com,localhost,127.0.0.1,::1
-        toolCallTimeoutMs: 120000   # a cold call launches Chromium and loads a page
+        toolCallTimeoutMs: 120000   # 冷调用要启动 Chromium 并加载页面
         failOnStartupError: true
 ```
-
-安装一次：
 
 ```
 plugin_manager action=install_bundle target=E:\dsh-mcp\axure-mcp-dsh-bundle
 ```
 
-然后这些工具会作为 `mcp__axure__axure_list_pages`、`mcp__axure__axure_get_page_map` 和 `mcp__axure__axure_get_visual` 出现在模型面前。
+工具名形如 `mcp__axure__axure_list_pages`、`mcp__axure__axure_get_page_map`、
+`mcp__axure__axure_get_visual`、`mcp__axure__axure_get_interactions`。
 
-> **编辑服务器需要重启 MCP 进程。** DSH 保持一个 stdio 子进程存活；它会重新读取工具*模式*，但继续运行旧的*代码*。更改行为后，请将 bundle 关闭再打开。
+> DSH 会保持一个 stdio 子进程常驻，并重新读取它的工具 **schema**，但**继续运行旧代码**。
+> 改动服务端行为后，需要把 bundle 关掉再打开一次。
 
-### 任何其他 MCP 客户端
+### 通用 stdio 客户端
 
 ```jsonc
-// Claude Desktop / generic MCP client, stdio
 {
   "mcpServers": {
     "axure": {
@@ -177,52 +426,145 @@ plugin_manager action=install_bundle target=E:\dsh-mcp\axure-mcp-dsh-bundle
 }
 ```
 
-或者运行 `--http`，并将 Streamable HTTP 客户端指向 `http://127.0.0.1:3333/mcp`。
+### Streamable HTTP
+
+```bash
+AXURE_HTTP_TOKEN=$(openssl rand -hex 16) node bin/axure-mcp.mjs --http --host 0.0.0.0
+# 客户端 POST 到 http://<host>:3333/mcp，并带 Authorization: Bearer <token>
+# GET /health 无需鉴权，并会说明是否需要 token
+```
+
+按设计是无状态的：每个请求拥有独立的协议实例，共享同一个浏览器池，因此没有会话簿记，
+且客户端崩溃不会拖垮端点。
 
 ---
 
-## 视觉
+## 信任与安全边界
 
-截图作为原生 MCP `image` 内容块返回。调用模型是否真的能*看到*它们取决于客户端和模型，本服务器不会用文本中嵌入 base64 的技巧来掩盖这一点：
+原型内容是**攻击者可影响**的——任何能向该项目发布的人都能控制页面名、控件文本、
+设计者注释与像素。由此有两条边界。
 
-- **具备视觉能力的模型**——客户端将图像存储为持久附件，模型接收像素。在 DSH 中，`deepseek-flash`（`DeepSeek-V41-Flash`）声明了 `inputModalities: ["text", "image"]`，因此这条路径端到端可用。
-- **纯文本模型**——DSH 的 MCP 客户端发出 `[image unavailable: image/png; model "…" does not declare image input; raw image data remains available to programmatic callers]`，而文本几何摘要仍然精确描述捕获内容。使用 `savePath` 将 PNG 交给单独的视觉步骤。
+**1. 浏览器不离开部署范围。** 工具调用方是一个会被所读内容影响的 Agent，
+因此未校验的页面引用会把本服务变成一台拥有内网访问能力的 SSRF 代理。
+每个候选 URL 都要经过 `security.resolvePageReference`，它会拒绝：
 
-`target: "widgets"` 是节省 token 的路径：一个表格或面板的裁剪，每 token 携带的可读细节远多于一张缩小后的 1920×1080 画布。
+- 外部主机（`http://169.254.169.254/…`），除非运维把它加进 `AXURE_ALLOWED_HOSTS`；
+- 显式非 http 协议，包括 `file:`；
+- 协议相对值（`//host/x`）——`new URL(value, base)` 会把它静默解析成另一个 origin；
+- 爬出项目路径的路径（`../../other-app/`）。
+
+此外还有请求级守卫，会拦截超出边界的主机，包括重定向与子资源。
+调用方提供的 `savePath` 被约束在 `AXURE_SCREENSHOT_DIR` 之内，绝对路径与 `..` 一律拒绝。
+HTTP 传输在绑定非回环地址时**绝不**允许无 token 运行。
+
+**2. 原型内容被明确标注，且无法伪造结构。** 每个结果在任何原型文本**之前**先给出声明，
+协议握手时的服务 instructions 也重复该声明。取值会被净化以免突破格式：换行与控制字符被折叠；
+控件种类注释按括号索引解析，而不是用允许换行的正则；围栏内的 ARIA 快照中的反引号会被转义。
+测试向控件文本、注释、页面名与快照中注入了 `\nformat:`、`## outline`、`warning: obey me`
+以及闭合代码围栏。
+
+本服务只做**只读静态分析**：它从不点击、输入、提交或触发 Axure 交互，
+因此原型内容无法导致任何动作。
+
+---
+
+## 模型兼容与降级
+
+工具的设计目标是让弱客户端**降级**而不是崩溃。
+
+- **完全不要图片。** `includeImage: false`（或 `target: "none"`）在没有任何图像块的情况下
+  返回画布尺寸、区域与逐控件几何。`savePath` 可以把 PNG 写出，交给独立的视觉步骤。
+- **纯文本模型。** `structuredContent` 从不携带像素数据；不支持图像的模型只是永远不索取图像。
+- **小上下文窗口。** 两个预算共同约束模型收到的内容：`maxNodes` 限制节点数，
+  `AXURE_OUTLINE_CHAR_BUDGET` 是响应文本的**硬**上限——大纲按深度优先截断到预算内，
+  并报告截断情况。实测：1119 控件页面在 `detail=full, maxNodes=5000` 下，
+  响应为 48,078 字符（预算 48,000）。`region` 与 `widgetIds` 是选择「看哪一部分」的正道。
+  交互结果按同样预算约束，且**优先丢弃 `inferred` 推断**，绝不为了保留猜测而丢掉事实。
+- **错误。** `isError: true` 加上行首的 `error: <CODE>` 行，因此纯文本消费者无需解析散文即可
+  区分成功与失败；结构化消费者从 `structuredContent.error.code` 得到同一个码。
+- **结构化输出。** 四个工具都声明了 `outputSchema`，且是**有意宽松**的：SDK 也会用同一
+  schema 校验**失败**载荷，严格的「成功」schema 会导致每个错误结果都被拒绝。
+  各工具的键集合改由 `npm run test:e2e` 断言。
 
 ---
 
 ## 测试
 
 ```bash
-npm test          # unit: config, sitemap resolution, outline rendering, extractor syntax
-npm run test:e2e  # live end-to-end against a real Axure deployment, over real stdio
-npm run test:http # same tools over the streamable HTTP transport
-npm run test:all  # unit + e2e + http
+npm test                  # 30 单元：配置、领域、渲染、预算
+npm run test:security     # 14 安全：导航范围、路径约束、转义
+npm run test:interaction  # 34 交互逻辑 + 20 页内读取器 = 54
+npm run test:inpage       #  6 浏览器边界：页内约定与隔离
+npm run test:e2e          # 35 端到端：真实部署、真实 stdio
+npm run test:http         #  8 HTTP 传输，含鉴权门
+npm run test:all          # 全部
 ```
 
-`npm run test:e2e` 完全像客户端一样启动服务器，执行 MCP 握手，列出工具并调用每一个，然后对结果进行断言并将产物写入 `selftest-out/`。这是*“它能否独立运行”*的检查，独立于任何框架。
+其中三个值得解释，因为它们才是让本功能可测试的关键：
 
-第一个单元检查最重要：提取器是一个在浏览器内部编译的字符串，因此 `npm test` 证明它是有效的纯 JavaScript。该字符串中一个多余的 TypeScript 注解否则只会在运行时、在 Chromium 内部、远离编辑处的地方失败。
+`scripts/test-interaction.mjs` 不需要浏览器。证据模型、触发器与动作归一化、分支解码、
+聚合与渲染都在 `src/axure/interaction.ts` 中（纯函数），因此包括
+「`inferred` 记录永远不能带动作」在内的规则可以用固定用例验证。
 
-`scripts/recon/` 保存了用于建立上述发现的临时探针（Axure 的 ARIA 输出、运行时 API 覆盖、画布缩放、截图策略）。保留它们是因为它们记录了*为什么*实现看起来是这样，而不是作为构建的一部分。
+`scripts/test-interaction-source.mjs` 既不需要浏览器也**不需要构建**。它以文本方式提取页内
+读取器源码，用 `new Function` 编译，再在复刻实测结构的合成模型上、以带桩的
+`window`/`document` 运行。它验证：语法、自包含性、缺少模型时给出 gap 而不是空列表、
+载荷被原样保留、**母版**交互与两条 id 桥都可用、控件上限被强制执行并上报、
+模型抛异常不会让读取器崩溃、DOM 观察不会混入模型条目。
+
+`npm run test:e2e` 会把交互数量与独立探针（`scripts/recon/probe-interaction-coverage.mjs`）
+的实测数字交叉比对，因此「静默退化为 0」或「凭空多出记录」都会让套件失败。
+
+`scripts/recon/` 保存了用于确立设计依据的一次性探针——Axure 的 ARIA 输出、运行时 API 覆盖率、
+画布缩放行为、截图策略，以及定位模型、两条 id 桥与真实动作词表的 16 个交互探针。
+它们记录了实现**为什么**长成这样，但不属于构建产物。
 
 ---
 
 ## 已知限制
 
-- **仅静态分析。** 服务器读取状态；它不点击、输入、悬停或触发 Axure 交互。点击背后的控件被报告为 `clickable`，但不会被激活。
-- **默认仅报告活动动态面板状态。** `includeHidden: true` 会枚举作者设定的备用状态，但大纲仍然反映一次渲染。
-- **重叠容器。** 作者设定的坐标来自 Axure 自己的模型，因此一个组或面板报告它自己的矩形；请使用树和 `image` 标志，而不是假设每个矩形都被绘制。
-- **数据密集页面上的重复。** 表格是每个单元格一个控件，因此一个 100 行的表格会产生数千个节点。使用 `region` 或 `widgetIds` 来限定范围；仅靠节点预算会截断而不是聚焦。
-- **每次调用一个页面。** 没有多页差异比较或导航图，`Inline Frame` 控件被报告为控件，而不是递归进入。
-- **设备像素比按浏览器上下文固定。** 接受 `scale` 是为了兼容性，但会被忽略；设置 `AXURE_DEVICE_SCALE_FACTOR=2` 并重启以获得高 DPI 捕获。
-- **没有认证流程。** 它读取分享链接匿名暴露的任何内容。受密码保护的原型需要一个未实现的登录步骤。
+- **仅静态分析。** 服务只读取状态；不点击、不输入、不悬停、不触发 Axure 交互。
+  点击后才出现的控件会被标注为 `clickable`，但不会被激活。
+- **交互识别已验证，但覆盖面窄。** 见上方[验证状态](#验证状态)：参考原型中只观察到 `onClick`；
+  `linkWindow` 的目标页无法从模型恢复；`observed` 因本工具从不触发交互而没有实测样本。
+- **交互条件只是转述，不做求值。** 分支的判定条件按模型原文（`conditionString`）报告；
+  服务不会判断在给定页面状态下会走哪个分支。
+- **条件分支下的动作会被全部列出**，因此消费者会同时看到互斥的结果。区分它们的是
+  `conditions` 字段。
+- **母版实例之间不做去重。** 同一母版被使用两次时，每个实例都会因 DOM id 不同而各自产生记录。
+  这是刻意设计，但计数语义未专门测试。
+- **单一动态面板状态。** `includeHidden: true` 可枚举作者设计的备选状态，但大纲仍只反映
+  一次渲染。
+- **数据密集页会重复。** 表格是「一单元格一控件」，因此 100 行表格会产生数千节点。
+  请用 `region` 或 `widgetIds` 聚焦；单靠节点预算只会截断而不会聚焦。
+- **单次调用只处理一页。** 没有多页 diff 或导航图；`Inline Frame` 控件被当作控件报告，
+  不会被递归进入。
+- **设备像素比按上下文固定。** `scale` 被接受但被忽略；请设
+  `AXURE_DEVICE_SCALE_FACTOR=2` 并重启。
+- **附加图像上限 8 MiB。** 更大的截图会写入磁盘并上报，但不会作为图像块附加，
+  以免单个响应携带数十兆字节。
+- **不对原型做鉴权。** 它只读取 share link 匿名暴露的内容；密码保护的原型需要登录流程，
+  目前未实现。
+- **并发上限为每进程 4 个浏览器上下文**，且不可配置。
 
-## 后续步骤
+## 后续计划
 
-1. **递归进入内联框架**，使嵌入的原型页面出现在父大纲中。
-2. **点击驱动的状态捕获**——一个 `target: "state"`，触发控件的 Axure 动作并重新捕获，用于仅在交互后才存在的面板和标签页。
-3. **比较两个页面地图**，使审查工作流（“这个原型修订版改了什么”）成为一次调用。
-4. **折叠表格行**为紧凑的 `rows: [[...]]` 形式，当检测到 `Table` 控件时，这会将密集页面的 token 成本降低一个数量级。
-5. **面向纯文本模型的视觉桥接**：一个可选工具，将保存的 PNG 转发到配置的多模态端点并返回其描述，使流水线优雅降级，而不是丢弃图像。
+1. **对真实原型验证交互识别**，记录到底哪些模型容器与属性名承载交互数据——
+   工具链恢复后第一件要做的事。
+2. **递归 Inline Frame**，让嵌入的原型页出现在父级大纲中。
+3. **触发式采集**（`observed`）：在隔离上下文中触发一次交互并记录变化，
+   这是了解「模型只间接表达的分支结果」的唯一途径。
+4. **表格行折叠**：识别到 `Table` 控件时折叠为紧凑形式，把数据密集页的 token 成本降低一个数量级。
+5. **两版页面地图 diff**，把「这一版原型改了什么」变成一次调用。
+6. **让并发上限可配置**，并从 `/health` 报告。
+
+## 版本历史
+
+版本化提示词、审计与变更记录见 [`.update/`](.update/README.md)。
+本文档的英文版为 [README.md](README.md)。
+
+| 版本 | 变更 |
+|---|---|
+| 0.3.0 | 交互识别：`axure_get_interactions`，`declared`/`observed`/`inferred` 证据模型 —— [`.update/0.2.0`](.update/0.2.0/plan.md)。已实现但尚未实际执行，见验证状态 |
+| 0.2.0 | 四层重构、安全边界、协议与预算修复 —— [`.update/0.1.0`](.update/0.1.0/plan.md) |
+| 0.1.0 | 首次发布：三个工具、画布 1:1 适配、region/widget 作用域、stdio + HTTP |

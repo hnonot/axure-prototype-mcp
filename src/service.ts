@@ -24,7 +24,12 @@ import { neutralizeUntrusted, resolveWithinBase, truncateWellFormed } from './se
 import type { FrameHandle, PlaywrightAdapter, SessionHandle } from './playwright/adapter.js';
 import { capturePageMap, flattenOutline, parseWidgetRef } from './axure/page-map.js';
 import { readSitemap, resolvePage, type ResolvedPage } from './axure/sitemap.js';
+import { INTERACTION_SOURCE, type RawInteractionCapture } from './axure/interaction-runtime.js';
+import { analyzeInteractions } from './axure/interaction-analyzer.js';
+import { summarize } from './axure/interaction.js';
 import type {
+  InteractionRequest,
+  InteractionResult,
   PageMapRequest,
   PageMapResult,
   SitemapResult,
@@ -347,6 +352,113 @@ export class AxureService {
    */
   #accessibilityBudget(): number {
     return Math.max(1_000, Math.min(16_000, Math.floor(this.#config.outlineCharBudget / 3)));
+  }
+
+  /**
+   * Analyse one page's interactions.
+   *
+   * The evidence level of every record is decided here, from the source it came from — never
+   * from how plausible the data looks. The project model produces `declared` facts; DOM
+   * appearance produces `inferred` guesses; and a source that could not be read produces a
+   * stated gap rather than an empty list that would read as "this page has no interactions".
+   */
+  async getInteractions(request: InteractionRequest): Promise<InteractionResult> {
+    const id = requestId();
+    const log = this.#log.child({ requestId: id, tool: 'get_interactions', page: request.page });
+    log.debug('analysing interactions');
+    const started = Date.now();
+
+    const opened = await this.#openPage(request.page, log, request.viewport);
+    try {
+      const frame = opened.content;
+      const pageId = this.#pageId(opened.page);
+      const warnings: string[] = [];
+
+      // Widget count and presence come from the outline extractor, so the interaction result and
+      // the page map agree about what is on the page.
+      let widgetCount = 0;
+      const presentWidgets = new Set<string>();
+      try {
+        const outline = await capturePageMap(
+          frame,
+          {
+            space: 'page',
+            detail: 'compact',
+            maxNodes: this.#config.maxOutlineNodes,
+            charBudget: this.#config.outlineCharBudget,
+            includeHidden: true,
+            includeAccessibility: false,
+            includeNotes: false,
+          },
+          pageId,
+        );
+        widgetCount = outline.stats.widgets;
+        for (const node of flattenOutline(outline.outline)) presentWidgets.add(node.id);
+      } catch (error) {
+        warnings.push(
+          `the page outline could not be read, so widget counts and target resolution are unavailable: ${messageOf(error)}`,
+        );
+      }
+
+      let capture: RawInteractionCapture;
+      try {
+        capture = await frame.run<RawInteractionCapture>(INTERACTION_SOURCE, {
+          maxWidgets: request.maxWidgets,
+        });
+      } catch (error) {
+        throw new InfrastructureError('RENDER_FAILED', `interaction extraction failed: ${messageOf(error)}`, {
+          retryable: true,
+          hint: 'The content frame may have navigated or the prototype may have re-rendered mid-capture; retry the call.',
+          cause: error,
+        });
+      }
+
+      if (!capture?.ok) {
+        throw new InfrastructureError('RENDER_FAILED', 'the in-page interaction reader did not report success');
+      }
+
+      const analysis = analyzeInteractions(
+        capture,
+        pageId,
+        widgetCount,
+        presentWidgets.size ? (widgetId: string) => presentWidgets.has(widgetId) : undefined,
+      );
+
+      const title = neutralizeUntrusted(await frame.title());
+      const interactions = request.includeInferred
+        ? analysis.interactions
+        : analysis.interactions.filter((fact) => fact.confidence !== 'inferred');
+
+      // The statistics must describe what is actually being returned, so they are recomputed
+      // after filtering rather than carried over from the unfiltered analysis.
+      const stats = summarize(interactions, widgetCount);
+
+      const result: InteractionResult = {
+        page: {
+          id: pageId,
+          name: opened.page.pageName ?? (title || pageId),
+          url: neutralizeUntrusted(opened.session.url()),
+          title,
+          type: opened.page.type ?? 'Wireframe',
+          path: opened.page.path,
+        },
+        interactions,
+        stats,
+        gaps: analysis.gaps,
+        warnings: [...warnings, ...analysis.warnings],
+      };
+
+      log.debug('interactions analysed', {
+        widgets: widgetCount,
+        declared: stats.byConfidence.declared,
+        inferred: stats.byConfidence.inferred,
+        gaps: result.gaps.length,
+        ms: Date.now() - started,
+      });
+      return result;
+    } finally {
+      await opened.session.close();
+    }
   }
 
   /** Capture pixels for one page, region or widget set. */

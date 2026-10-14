@@ -17,8 +17,8 @@ import type { AxureConfig } from '../config.js';
 import type { AxureService } from '../service.js';
 import type { Logger } from '../logger.js';
 import { TOOL_NAMES } from './names.js';
-import { errorContent, pageMapContent, sitemapContent, visualContent } from './format.js';
-import type { PageMapRequest, VisualRequest } from '../types.js';
+import { errorContent, interactionContent, pageMapContent, sitemapContent, visualContent } from './format.js';
+import type { InteractionRequest, PageMapRequest, VisualRequest } from '../types.js';
 
 export { TOOL_NAMES } from './names.js';
 
@@ -312,6 +312,68 @@ export function registerTools(server: McpServer, context: ToolContext): void {
         return visualContent(result);
       } catch (error) {
         log.warn('get_visual failed', { error: String(error) });
+        return errorContent(error);
+      }
+    },
+  );
+
+  // ---------------------------------------------------------------------------
+  // axure_get_interactions
+  // ---------------------------------------------------------------------------
+  server.registerTool(
+    TOOL_NAMES.interactions,
+    {
+      title: 'Get Axure page interactions and interactive elements',
+      description:
+        'Report which widgets on an Axure page respond to user input, and what each one does: page navigation, ' +
+        'opening a URL, switching a dynamic panel state, showing or hiding elements, setting text or values, ' +
+        'expanding, waiting, and so on. Triggers (click, hover, focus, text change, selection, load) come from the ' +
+        'project model rather than from appearance.\n\n' +
+        'Every record states its own evidence level in `confidence`, and this is the point of the tool:\n' +
+        '- "declared" — the project model states the interaction. A fact, with its action list.\n' +
+        '- "observed" — the interaction was actually triggered and this is what changed. A fact, but covering only the ' +
+        'one branch that ran. This build does not trigger interactions, so this level is normally absent.\n' +
+        '- "inferred" — the widget merely looks interactive (pointer cursor, form element, focusable). A GUESS. It ' +
+        'never carries actions, because the action is not known.\n\n' +
+        'If a source could not be read, the result says so in `gaps`. An empty `declared` list together with a gap ' +
+        'means "could not read", which is different from "this page declares no interactions"; the response states ' +
+        'which one applies rather than leaving it to inference.\n\n' +
+        'Set includeInferred=false for a facts-only view. This tool is read-only and does not click, type or change ' +
+        'page state.',
+      inputSchema: {
+        page: pageSelector,
+        includeInferred: z
+          .boolean()
+          .optional()
+          .describe(
+            'Include "inferred" guesses (default true). They are always labelled, so leave this on unless you ' +
+              'specifically want model-declared facts only.',
+          ),
+        maxWidgets: z
+          .number()
+          .int()
+          .min(1)
+          .max(2_000)
+          .optional()
+          .describe('Cap on model entries read (default 400). Lower it to bound a very large response.'),
+        viewport: viewportSchema,
+      },
+      outputSchema: outputShape,
+      annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
+    },
+    async (args) => {
+      const log = context.log.child({ tool: 'get_interactions' });
+      try {
+        const request: InteractionRequest = {
+          page: args.page,
+          includeInferred: args.includeInferred ?? true,
+          maxWidgets: args.maxWidgets ?? 400,
+          viewport: args.viewport,
+        };
+        const result = await context.service.getInteractions(request);
+        return interactionContent(result, context.config.outlineCharBudget);
+      } catch (error) {
+        log.warn('get_interactions failed', { error: String(error) });
         return errorContent(error);
       }
     },

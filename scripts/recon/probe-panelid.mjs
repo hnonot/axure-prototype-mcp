@@ -1,0 +1,11 @@
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
+const t = new StdioClientTransport({ command: process.execPath, args: ["bin/axure-mcp.mjs"], env: { ...process.env, AXURE_URL: "https://axure.example.com/ProjectB", NO_PROXY: "axure.example.com,localhost,127.0.0.1" }, stderr: "ignore" });
+const c = new Client({ name: "probe", version: "0" });
+await c.connect(t);
+const r = await c.callTool({ name: "axure_get_interactions", arguments: { page: "6k5oyo", includeInferred: false } });
+const facts = r.structuredContent.interactions;
+const ps = facts.flatMap((f) => (f.branches ?? []).flatMap((b) => b.actions)).filter((a) => a.kind === "set-panel-state");
+console.log("set-panel-state actions:", ps.length);
+console.log(JSON.stringify(ps.slice(0, 3), null, 1));
+await c.close();

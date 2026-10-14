@@ -20,22 +20,23 @@ import type { AxureConfig } from '../config.js';
 import { InfrastructureError, messageOf } from '../errors.js';
 import type { Logger } from '../logger.js';
 import { assertNavigable, permittedHosts } from '../security.js';
+import { INPAGE_FACTORY_NAME } from '../axure/inpage.js';
 
 /**
  * The narrow frame surface the domain layer is allowed to use.
  *
  * There is exactly **one** way to run code in the page, and it always uses the same convention:
- * `declaration` must define `axureExtractOutline`, which is then called with `arg`. The domain
- * module `axure/extract-source.ts` follows that convention, as do the small snippets in
- * `service.ts`.
+ * `declaration` must define `INPAGE_FACTORY_NAME` (see `axure/inpage.ts`), which is then called
+ * with `arg`. The domain modules `axure/extract-source.ts`, `axure/interaction-runtime.ts`,
+ * `axure/sitemap.ts` and the small snippets in `service.ts` all follow it.
  *
- * The convention is deliberately singular. An earlier revision exposed both
- * "evaluate an expression" and "run a named factory", and the sitemap reader silently used the
- * wrong one, producing `ReferenceError: axureExtractOutline is not defined` at run time. One
- * shape, checked by `scripts/test-inpage.mjs`, removes that class of mistake.
+ * The convention is deliberately singular. An earlier revision exposed both "evaluate an
+ * expression" and "run a named factory", and the sitemap reader silently used the wrong one,
+ * producing `ReferenceError: axureExtractOutline is not defined` at run time. One shape, checked
+ * by `scripts/test-inpage.mjs`, removes that class of mistake.
  */
 export interface FrameHandle {
-  /** Compile `declaration` in the frame, call its `axureExtractOutline` factory, return the result. */
+  /** Compile `declaration` in the frame, call its factory, and return the result. */
   run<T>(declaration: string, arg?: unknown): Promise<T>;
   /** The frame's document title. */
   title(): Promise<string>;
@@ -212,6 +213,51 @@ export class PlaywrightAdapter {
     });
   }
 
+  /**
+   * Capture Axure's decoded page model before the page's own scripts consume it.
+   *
+   * The interaction specification lives in `files/<page>/data.js`, which is minified but passes
+   * **real property names** into `$axure.loadCurrentPage(...)`. Intercepting that call yields the
+   * fully decoded model, which is far more robust than parsing the obfuscated source.
+   *
+   * This must run before any page script, so it is installed as an init script. It is read-only:
+   * the wrapper stores the argument and delegates, changing nothing about page behaviour.
+   *
+   * Measured payload (reference deployment, Axure 10):
+   * - `model.page.diagram.objects` — the widget tree, nested via `objs`
+   * - `model.objectPaths[hash].scriptId` — the bridge to the DOM's `u<N>` ids (1119/1119 exact)
+   * - `widget.interactionMap[event].cases[].actions[]`
+   */
+  async #installModelCapture(context: BrowserContext): Promise<void> {
+    await context.addInitScript(() => {
+      const install = (): boolean => {
+        const ax = (window as unknown as { $axure?: Record<string, unknown> }).$axure;
+        if (!ax || typeof ax.loadCurrentPage !== 'function') return false;
+        const target = ax as { loadCurrentPage: ((...args: unknown[]) => unknown) & { __axureMcpHooked?: boolean } };
+        if (target.loadCurrentPage.__axureMcpHooked) return true;
+        const original = target.loadCurrentPage;
+        const wrapped = function (this: unknown, ...args: unknown[]): unknown {
+          try {
+            (window as unknown as { __axureMcpPageModel?: unknown }).__axureMcpPageModel = args[0];
+          } catch {
+            /* a failed capture must never break the page */
+          }
+          return original.apply(this, args);
+        };
+        wrapped.__axureMcpHooked = true;
+        target.loadCurrentPage = wrapped;
+        return true;
+      };
+      if (install()) return;
+      // `$axure` may not exist yet; poll briefly rather than relying on a specific load order.
+      let attempts = 0;
+      const timer = setInterval(() => {
+        attempts += 1;
+        if (install() || attempts > 400) clearInterval(timer);
+      }, 10);
+    });
+  }
+
   /** Open one isolated session. Callers must `close()` it. */
   async openSession(): Promise<SessionHandle> {
     const release = await this.#semaphore.acquire();
@@ -261,6 +307,7 @@ export class PlaywrightAdapter {
     page.setDefaultTimeout(this.#config.navigationTimeoutMs);
     page.setDefaultNavigationTimeout(this.#config.navigationTimeoutMs);
     await this.#installNavigationGuard(context);
+    await this.#installModelCapture(context);
 
     const config = this.#config;
     const withTimeout = <T>(promise: Promise<T>, label: string): Promise<T> =>
@@ -270,13 +317,14 @@ export class PlaywrightAdapter {
       run: <T>(declaration: string, arg?: unknown): Promise<T> =>
         withTimeout(
           frame.evaluate(
-            ({ declaration: code, value }) => {
+            ({ declaration: code, value, factoryName }) => {
               // Every name used here must exist in the page: nothing from the adapter's module
               // scope is visible inside this function, which `scripts/test-inpage.mjs` guards.
-              const factory = new Function(`${code}; return axureExtractOutline;`)() as (input: unknown) => T;
+              // `factoryName` therefore arrives as *payload*, not as an interpolated constant.
+              const factory = new Function(`${code}; return ${factoryName};`)() as (input: unknown) => T;
               return factory(value);
             },
-            { declaration, value: arg },
+            { declaration, value: arg, factoryName: INPAGE_FACTORY_NAME },
           ),
           'in-page script',
         ),

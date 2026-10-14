@@ -23,7 +23,8 @@ import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import { AxureMcpError, ERROR_CODES, messageOf } from '../errors.js';
 import { neutralizeUntrusted } from '../security.js';
 import { UNTRUSTED_NOTICE, renderPageMapWithin, renderSitemapResult, renderVisual } from '../axure/render.js';
-import type { PageMapResult, SitemapResult, VisualResult } from '../types.js';
+import { renderInteractions } from '../axure/interaction-render.js';
+import type { InteractionResult, PageMapResult, SitemapResult, VisualResult } from '../types.js';
 
 type TextBlock = { type: 'text'; text: string };
 type ImageBlock = { type: 'image'; data: string; mimeType: string };
@@ -171,5 +172,57 @@ export function visualContent(result: VisualResult): CallToolResult {
       ? { type: 'image', data: result.image.base64, mimeType: 'image/png' }
       : undefined,
   );
+}
+
+/**
+ * Format the interaction-analysis result.
+ *
+ * The text is bounded by the same character budget as the page map, because a dense page can
+ * carry as many interactions as widgets. `inferred` records are dropped first when trimming:
+ * they are the least informative, and a reader must never lose a fact while keeping a guess.
+ */
+export function interactionContent(result: InteractionResult, charBudget: number): CallToolResult {
+  const { text, droppedInferred } = renderInteractionsWithin(result, charBudget);
+
+  const structured = {
+    ok: true as const,
+    page: result.page,
+    stats: result.stats,
+    interactions: result.interactions,
+    gaps: result.gaps,
+    warnings:
+      droppedInferred > 0
+        ? [
+            ...result.warnings,
+            `${droppedInferred} inferred records were omitted from this payload to respect the response budget; ` +
+              'the declared facts are all present. Re-run with includeInferred=false to see this deliberately.',
+          ]
+        : result.warnings,
+  };
+
+  return ok(text, structured);
+}
+
+/**
+ * Render interactions inside a character budget.
+ *
+ * Trimming order is deliberate and stated in the output: `inferred` guesses go first, and if the
+ * budget is still exceeded the remaining records are cut with an explicit count. Facts are never
+ * silently dropped while guesses survive.
+ */
+function renderInteractionsWithin(result: InteractionResult, charBudget: number): { text: string; droppedInferred: number } {
+  const full = renderInteractions(result);
+  if (full.length <= charBudget) return { text: full, droppedInferred: 0 };
+
+  const inferred = result.interactions.filter((fact) => fact.confidence === 'inferred');
+  const factsOnly: InteractionResult = {
+    ...result,
+    interactions: result.interactions.filter((fact) => fact.confidence !== 'inferred'),
+  };
+  const trimmed = renderInteractions(factsOnly);
+  const note =
+    `\n\nwarning: ${inferred.length} inferred records were omitted to stay inside the ` +
+    `${charBudget}-character response budget, so the facts above are complete but the guesses are not.`;
+  return { text: `${trimmed}${note}`, droppedInferred: inferred.length };
 }
 

@@ -3,6 +3,7 @@ export const TOOL_NAMES = {
   listPages: 'axure_list_pages',
   pageMap: 'axure_get_page_map',
   visual: 'axure_get_visual',
+  interactions: 'axure_get_interactions',
 } as const;
 
 /** Every tool name as an array, for assertions and documentation. */

@@ -80,7 +80,7 @@ check('MCP initialize handshake', true, `server=${client.getServerVersion()?.nam
 // --- tools/list -------------------------------------------------------------
 const { tools } = await client.listTools();
 const names = tools.map((tool) => tool.name);
-check('tools/list returns the 3 tools', names.length === 3, names.join(', '));
+check('tools/list returns the 4 tools', names.length === 4, names.join(', '));
 for (const tool of tools) {
   const required = tool.inputSchema?.required ?? [];
   check(`tool schema present: ${tool.name}`, !!tool.inputSchema && required.length === 0, `required=[${required.join(',')}]`);
@@ -301,6 +301,87 @@ check(
   'traversal rejected, reported as a warning, capture still returned',
 );
 
+// --- interaction recognition -------------------------------------------------
+// The reference page declares exactly six interactions, measured independently with a recon
+// probe before this tool existed (`scripts/recon/probe-interaction-coverage.mjs`): six checkbox
+// toggles, each an onClick with two cases setting the selected state. Asserting the real numbers
+// keeps this honest — a silent regression to zero, or a surge of invented records, both fail.
+const interactions = await call('axure_get_interactions', { page: dense.id }, 'call axure_get_interactions');
+const interactionData = interactions.structuredContent ?? {};
+const facts = interactionData.interactions ?? [];
+const declared = facts.filter((fact) => fact.confidence === 'declared');
+const inferred = facts.filter((fact) => fact.confidence === 'inferred');
+
+check(
+  'axure_get_interactions returns the page model interactions',
+  facts.length > 0 && declared.length > 0,
+  `${declared.length} declared, ${inferred.length} inferred, gaps=${(interactionData.gaps ?? []).length}`,
+);
+check(
+  'declared interaction count matches the independent recon probe (6)',
+  declared.length === 6,
+  `${declared.length} declared`,
+);
+check(
+  'no gaps were reported, so the model bridge was read end to end',
+  (interactionData.gaps ?? []).length === 0,
+  JSON.stringify((interactionData.gaps ?? []).map((gap) => gap.source)),
+);
+check(
+  'every declared interaction is attributed to a widget the page map also knows',
+  declared.every((fact) => /^[^\s#]+#u\d+$/.test(fact.widgetRef)),
+  declared.length ? `e.g. ${declared[0].widgetRef}` : 'none',
+);
+check(
+  'declared interactions carry triggers and branches',
+  declared.every((fact) => fact.trigger === 'click' && (fact.branches ?? []).length >= 1),
+  declared.length
+    ? `e.g. <${declared[0].trigger}> ${(declared[0].branches ?? []).length} branch(es), actions: ` +
+      `${(declared[0].branches ?? []).flatMap((branch) => branch.actions).map((action) => action.kind).join(',')}`
+    : 'none',
+);
+check(
+  'conditions are reported as the model wrote them',
+  declared.some((fact) =>
+    (fact.branches ?? []).some((branch) => (branch.conditions ?? []).some((condition) => condition.conditionString)),
+  ),
+  declared[0]?.branches?.[0]?.conditions?.[0]?.conditionString ?? 'no conditionString found',
+);
+check(
+  'inferred records never carry actions',
+  inferred.every((fact) => fact.branches === undefined),
+  `${inferred.length} inferred, all action-free`,
+);
+check(
+  'includeInferred=false yields facts only',
+  (await call('axure_get_interactions', { page: dense.id, includeInferred: false }, 'call axure_get_interactions')).structuredContent?.interactions?.every(
+    (fact) => fact.confidence !== 'inferred',
+  ) === true,
+  'facts-only view contains no guesses',
+);
+
+// `版本更新记录` keeps its interactions inside an Axure **master**, which the reader reaches
+// through `model.masters` and resolves through the master's own `scriptIds[0]`. It exercises the
+// action vocabulary the other page lacks: dynamic panel switching and link navigation.
+const masterPage = pageList.find((page) => /版本更新记录/.test(page.name)) ?? target;
+const masterResult = await call('axure_get_interactions', { page: masterPage.id, includeInferred: false }, 'call axure_get_interactions');
+const masterData = masterResult.structuredContent ?? {};
+const masterFacts = masterData.interactions ?? [];
+const masterKinds = new Set(
+  masterFacts.flatMap((fact) => (fact.branches ?? []).flatMap((branch) => branch.actions.map((action) => action.kind))),
+);
+check(
+  'interactions inside an Axure master are found and attributed',
+  masterFacts.length === 18 && masterFacts.every((fact) => /#u\d+$/.test(fact.widgetRef)),
+  `${masterFacts.length} declared on ${masterPage.id}, e.g. ${masterFacts[0]?.widgetRef ?? 'none'}`,
+);
+check(
+  'non-toggle action kinds are normalized, not left as "other"',
+  (masterKinds.has('set-panel-state') || masterKinds.has('open-url') || masterKinds.has('navigate')) &&
+    !masterKinds.has('other'),
+  `kinds: ${[...masterKinds].sort().join(', ')}`,
+);
+
 // --- error transparency ------------------------------------------------------
 const blocked = await call('axure_get_page_map', { page: 'http://169.254.169.254/' }, 'call axure_get_page_map');
 const blockedText = blocked.content?.find((block) => block.type === 'text')?.text ?? '';
@@ -319,5 +400,6 @@ if (failed.length) {
   console.log('failed:', failed.map((result) => result.name).join(', '));
   process.exitCode = 1;
 }
+
 
 

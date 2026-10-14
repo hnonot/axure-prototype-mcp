@@ -1,30 +1,81 @@
 # Axure Prototype MCP
 
 A standalone [Model Context Protocol](https://modelcontextprotocol.io) server that gives any
-MCP-compatible host **structural, spatial and visual** access to an Axure prototype published as
-a share link.
+MCP-compatible host **structural, spatial, visual and interaction** access to an Axure prototype
+published as a share link.
 
 ```
-structure + space + visual, for the same page, in one call:
+structure + space + visual + interaction, for the same page, in one call each:
 
-  axure_list_pages    -> what pages exist             (cheap discovery)
-  axure_get_page_map  -> what is where, plus text     (the workhorse)
-  axure_get_visual    -> the matching pixels          (coordinates stay aligned)
+  axure_list_pages         -> what pages exist             (cheap discovery)
+  axure_get_page_map       -> what is where, plus text     (the workhorse)
+  axure_get_visual         -> the matching pixels          (coordinates stay aligned)
+  axure_get_interactions   -> what responds to input       (facts vs. guesses, labelled)
 ```
 
 It has no dependency on any particular host, model or client library: one `npm install`, one
 `node bin/axure-mcp.mjs`, and it speaks standard MCP over **stdio** or **Streamable HTTP**.
 
-- [Architecture](#architecture)
-- [Tools](#tools)
-- [Install and run](#install-and-run)
-- [Configuration](#configuration)
-- [Connecting a host](#connecting-a-host)
-- [Trust and safety](#trust-and-safety)
-- [Model compatibility](#model-compatibility)
-- [Tests](#tests)
-- [Known limitations](#known-limitations)
-- [Version history](#version-history)
+- [Axure Prototype MCP](#axure-prototype-mcp)
+  - [Architecture](#architecture)
+    - [Why the outline is parsed rather than derived from ARIA](#why-the-outline-is-parsed-rather-than-derived-from-aria)
+    - [Relationship to MCP Resources and Prompts](#relationship-to-mcp-resources-and-prompts)
+  - [Tools](#tools)
+    - [`axure_list_pages`](#axure_list_pages)
+    - [`axure_get_page_map`](#axure_get_page_map)
+    - [`axure_get_visual`](#axure_get_visual)
+    - [`axure_get_interactions`](#axure_get_interactions)
+    - [Failures](#failures)
+  - [Install and run](#install-and-run)
+  - [Configuration](#configuration)
+  - [Connecting a host](#connecting-a-host)
+    - [DSH](#dsh)
+    - [Generic stdio client](#generic-stdio-client)
+    - [Streamable HTTP](#streamable-http)
+  - [Trust and safety](#trust-and-safety)
+  - [Model compatibility](#model-compatibility)
+  - [Tests](#tests)
+  - [Known limitations](#known-limitations)
+  - [Next steps](#next-steps)
+  - [Version history](#version-history)
+
+## Verification status
+
+All four tools are implemented and **verified against a live Axure deployment**
+(`https://axure.example.com/ProjectB`, Axure 10). The numbers below are from actual runs, and the interaction
+findings were cross-checked with an independent recon probe before the tool existed.
+
+| Suite | Command | Result |
+|---|---|---|
+| Build | `npm run build` | clean |
+| Unit | `npm test` | 30/30 |
+| Security | `npm run test:security` | 14/14 |
+| Browser boundary | `npm run test:inpage` | 6/6 |
+| Interaction logic + rendering | `npm run test:interaction` (first) | 34/34 |
+| In-page reader | `npm run test:interaction` (second) | 20/20 |
+| End-to-end (live prototype, real stdio) | `npm run test:e2e` | 35/35 |
+| HTTP transport | `npm run test:http` | 8/8 |
+
+Measured interaction coverage on the reference prototype:
+
+| Page | Widgets | With interactions | Cases | Events | Actions |
+|---|---|---|---|---|---|
+| 订单管理 `w2yv7l` | 1119 | 6 | 12 | `onClick` | `setFunction` ×12 |
+| 版本更新记录 `6k5oyo` | 113 | 18 | 18 | `onClick` | `setPanelState` ×8, `linkWindow` ×10, `setFunction` ×10 |
+| 工单管理 `b8yrp4` | 833 | 6 | 12 | `onClick` | `setFunction` ×12 |
+
+**What is not verified** — stated plainly rather than implied:
+
+- **Only `onClick` was observed.** Hover, input, selection, keyboard and page-load triggers have
+  normalization rules but **no measured sample**, because every interaction in this prototype is a
+  click. Their handling is therefore untested.
+- **`linkWindow` destinations are unknown.** The measured payload's `target` carries only
+  `targetType: "page"` and no `pageId`, so a link action reports `Open Link` **without inventing a
+  destination**. This is a capability boundary, not a bug to paper over.
+- **`observed` is never produced.** This tool does not fire interactions (doing so changes page
+  state and is a separate risk), so that evidence level has a complete data structure and
+  constructor but no live sample.
+- **Other Axure versions are untested.** Every conclusion comes from this one Axure 10 deployment.
 
 ---
 
@@ -56,10 +107,20 @@ cannot quietly become another layer's concern.
 |---|---|---|
 | `src/mcp/` | Tool schemas, result assembly, registration | touch the filesystem or the network |
 | `src/service.ts` | Turn a request into browser operations; own policy | know about MCP, models or clients |
-| `src/axure/` | Axure extraction, scoping, rendering | import `playwright` — it takes a `FrameHandle` |
+| `src/axure/` | Axure extraction, scoping, interaction analysis, rendering | import `playwright` — it takes a `FrameHandle` |
 | `src/playwright/` | Own Chromium, isolate sessions, enforce the boundary | know what an Axure page is |
 | `src/security.ts` | The one place deciding where the browser may go and what may be written | |
 | `src/config.ts` | Read and validate the environment, failing fast | contain feature logic |
+
+Inside `src/axure/`, the interaction feature is split by **what can be verified without a
+browser**, which is what made it testable while the build toolchain was unavailable:
+
+| File | Role | Tested by |
+|---|---|---|
+| `interaction.ts` | Pure reasoning: evidence levels, trigger/action normalization, aggregation | `test-interaction.mjs` (fixtures) |
+| `interaction-source.ts` | The in-page reader, as a plain JS string | `test-interaction-source.mjs` (compiles and runs it against a synthetic model) |
+| `interaction-analyzer.ts` | Decides each record's evidence level from its source | `test-interaction.mjs` |
+| `interaction-render.ts` | Text output, keeping facts and guesses in separate sections | `test-interaction.mjs` |
 
 Two consequences are worth naming, because they are what the layering buys:
 
@@ -84,6 +145,37 @@ opacity and text for **113 of 113** widgets on the reference page.
 
 So the outline is parsed from Axure's own markup and runtime. `includeAccessibility: true` still
 returns the ARIA snapshot, chiefly to *demonstrate* the point above rather than to extract from it.
+
+### Where interaction data actually lives
+
+Established by 16 probes against the live deployment, which refuted three initial assumptions:
+
+| Assumption | Measured reality |
+|---|---|
+| `$axure.document` is readable | `$axure` in the content frame is a **function** with no `.document`; `$axure.internal` exposes no keys |
+| A binding table is reachable on `$axure` | No usable path/id resolver exists |
+| DOM appearance is enough | It yields only guesses, and duplicates the model — so it is confined to the `inferred` channel |
+
+The working route: `files/<page>/data.js` is obfuscated, but it passes **real property names** into
+`$axure.loadCurrentPage(model)`. Hooking that call with `addInitScript` — before any page script runs
+— yields the fully decoded model:
+
+| What | Where |
+|---|---|
+| Page widget tree | `model.page.diagram.objects`, children under `objs` |
+| Masters | `model.masters.<hash>.diagram.objects`, children under `objs` **and** `diagrams[].objects` |
+| A widget | `{ id: <32-char hash>, label, friendlyType, interactionMap? }` |
+| Its interactions | `interactionMap[event].cases[].actions[]` |
+
+The page map addresses widgets as `u<N>` while the model keys them by hash, so two bridges are
+needed — and **neither alone is sufficient**:
+
+1. `model.objectPaths[hash].scriptId` — page-level widgets (measured **1119/1119** exact).
+2. A widget's own `scriptIds[0]` — master widgets, which have no `objectPaths` at all (measured
+   **18/18** exact).
+
+A page-level button that switches a panel *inside a master* needs both at once, which is why the
+reader merges them.
 
 ### Relationship to MCP Resources and Prompts
 
@@ -160,6 +252,60 @@ map's coordinates.
 
 `structuredContent`: `{ ok, page, target, space, canvas, viewport, region?, widgets[], missingWidgets?, image{bytes,mimeType,attached}, savedTo?, warnings[] }`
 
+### `axure_get_interactions`
+
+Reports which widgets respond to input, and what each one does. Triggers and actions are read
+from the project model, never guessed from appearance.
+
+| Argument | Type | Meaning |
+|---|---|---|
+| `page` | string | As above |
+| `includeInferred` | boolean | Include `inferred` guesses (default true) |
+| `maxWidgets` | 1–2000 | Cap on model entries read (default 400) |
+| `viewport` | object | Rendering control |
+
+`structuredContent`: `{ ok, page, stats, interactions[], gaps[], warnings[] }`
+
+#### The evidence model
+
+Every record states how much is actually known about it. This is the point of the tool: the
+iteration requires that a guess is never presented as a confirmed result, so the level travels
+**with the data** and a consumer can filter on it mechanically.
+
+| `confidence` | Meaning | Has actions? |
+|---|---|---|
+| `declared` | The project model states this interaction. A fact. | Yes, with conditions and branches |
+| `observed` | The interaction was triggered and this is what changed. A fact, but covering only the one branch that ran. | Yes, for that branch only |
+| `inferred` | The widget merely looks interactive (pointer cursor, form element, focusable, ARIA role). A **guess**. | **No** — never |
+
+`inferred` records cannot carry actions by construction: the constructor that builds them has no
+parameter that accepts an action list, so no later edit can attach one by forgetting the rule.
+Each `inferred` record states its basis in `inferredReason`.
+
+If a source could not be read, the result says so in `gaps` rather than returning a bare empty
+list. `declared: 0` **with** a gap means "could not read"; `declared: 0` with **no** gap means
+"the model is readable and declares nothing". The response text states which of the two applies,
+because conflating them would be exactly the fabrication this feature is designed to avoid.
+
+```
+stats: 12 of 113 widgets have interaction information; 9 declared, 0 observed, 3 inferred; 14 branches
+actions: set-panel-state=4 navigate=2 show=3 hide=1 wait=1
+
+## declared interactions (facts from the project model)
+  p1#u5 <click> "库存管理"
+    Case 1 if [[This.text]] equals "x" -> set panel state(widget u4 state=1) ; wait(300ms)
+
+## inferred interactivity (guesses — no actions known)
+  p1#u47 <click> — CSS cursor is pointer, which suggests it is meant to be clicked
+```
+
+#### What this tool does not do
+
+It **does not click, type or otherwise fire an interaction**. Doing so changes page state, which
+is a different capability with a different risk profile, and it is not enabled. `observed` records
+are therefore normally absent; the level exists so that adding trigger-driven capture later is an
+additive change rather than a schema break.
+
 ### Failures
 
 A failure returns `isError: true` with the **same stable code** in the text and in
@@ -199,7 +345,7 @@ npx playwright install chromium     # once
 npm run build
 
 node bin/axure-mcp.mjs                          # stdio (default)
-node bin/axure-mcp.mjs --http                   # Streamable HTTP on 127.0.0.1:3333
+node bin/axure-mcp.mjs --http                   # Streamable HTTP on 127.0.0.1:7458
 node bin/axure-mcp.mjs --help                   # full option and env reference
 node --env-file=.env bin/axure-mcp.mjs          # load configuration from a file
 ```
@@ -375,21 +521,37 @@ The tools are designed so a weak client degrades rather than breaks.
 ## Tests
 
 ```bash
-npm test              # 30 unit: config, domain, rendering, budgets
-npm run test:security # 14 security: navigation scope, path confinement, escaping
-npm run test:e2e      # 24 end-to-end against the live deployment, over real stdio
-npm run test:http     #  8 HTTP transport, including the authentication gate
-npm run test:all      # everything
+npm test                  # 30 unit: config, security-independent domain, rendering, budgets
+npm run test:security     # 14 security: navigation scope, path confinement, escaping
+npm run test:interaction  # 34 interaction logic + 20 in-page reader = 54
+npm run test:inpage       #  6 browser-boundary: in-page convention and isolation
+npm run test:e2e          # 35 end-to-end against the live deployment, over real stdio
+npm run test:http         #  8 HTTP transport, including the authentication gate
+npm run test:all          # everything
 ```
 
-`scripts/test-inpage.mjs` (6 checks) guards the browser boundary separately: the in-page extractor
-and the adapter's callback are compiled with `new Function` in Node, so a reference to module scope
-fails here rather than as a `ReferenceError` inside Chromium. It also enforces the single in-page
-convention (`axureExtractOutline`), which caught a real inconsistency during the refactor.
+Three of these are worth explaining, because they are what makes this feature testable.
+
+`scripts/test-interaction.mjs` needs no browser. The evidence model, trigger and action
+normalization, branch decoding, aggregation and rendering all live in `src/axure/interaction.ts`,
+which is pure, so the rules — including "an inferred record can never carry actions" — are verified
+from fixtures.
+
+`scripts/test-interaction-source.mjs` needs no browser **and no build**. It extracts the in-page
+reader's source textually, compiles it with `new Function`, and runs it against synthetic models
+replicating the measured structure with a stubbed `window`/`document`. It verifies syntax,
+self-containment, that a missing model produces a stated gap instead of a bare empty list, that
+payloads are preserved verbatim, that **master** interactions and both id bridges work, that the
+widget cap is enforced and reported, and that a model which throws does not crash the reader.
+
+`npm run test:e2e` cross-checks the interaction counts against numbers measured by an independent
+recon probe (`scripts/recon/probe-interaction-coverage.mjs`), so a silent regression to zero or a
+surge of invented records both fail the suite.
 
 `scripts/recon/` holds the throwaway probes used to establish the findings behind the design —
-Axure's ARIA output, runtime API coverage, canvas scaling behaviour, screenshot strategies. They
-document *why* the implementation looks the way it does and are not part of the build.
+Axure's ARIA output, runtime API coverage, canvas scaling behaviour, screenshot strategies, and the
+16 interaction probes that located the model, the two id bridges, and the real action vocabulary.
+They document *why* the implementation looks the way it does and are not part of the build.
 
 ---
 
@@ -397,6 +559,17 @@ document *why* the implementation looks the way it does and are not part of the 
 
 - **Static analysis only.** The server reads state; it does not click, type, hover or trigger Axure
   interactions. Widgets behind a click are reported as `clickable`, not activated.
+- **Interaction recognition is verified but narrow.** See the verification status above: only
+  `onClick` was observed in the reference prototype, `linkWindow` destinations are not recoverable
+  from the model, and `observed` has no live sample because this tool never fires interactions.
+- **Interaction conditions are paraphrased, not evaluated.** A branch's guard is reported as the
+  model wrote it (`conditionString`); the server does not determine which branch a given page state
+  would take.
+- **Actions behind a conditional branch are all listed**, so a consumer sees mutually exclusive
+  outcomes together. The `conditions` field is what distinguishes them.
+- **Master instances are not de-duplicated across instances.** One master used twice produces
+  records per rendered instance, which differ by DOM id. That is intentional, but the counting
+  semantics have not been specifically tested.
 - **One dynamic-panel state.** `includeHidden: true` enumerates authored states, but the outline
   still reflects a single rendering.
 - **Repetition on data-dense pages.** A table is one widget per cell, so a 100-row table produces
@@ -414,19 +587,25 @@ document *why* the implementation looks the way it does and are not part of the 
 
 ## Next steps
 
-1. **Recurse into inline frames** so embedded prototype pages appear in the parent outline.
-2. **Click-driven state capture** — a `target: "state"` that triggers a widget's Axure action and
-   re-captures, for panels and tabs that exist only after interaction.
-3. **Collapse table rows** into a compact form when a `Table` widget is detected, cutting dense-page
+1. **Verify interaction recognition against a live prototype** and record which model containers
+   and property names actually carry interaction data — the first thing to do once the toolchain
+   is available.
+2. **Recurse into inline frames** so embedded prototype pages appear in the parent outline.
+3. **Trigger-driven capture** (`observed`): fire one interaction in an isolated context and record
+   what changed, which is the only way to learn a branch outcome that the model expresses
+   indirectly.
+4. **Collapse table rows** into a compact form when a `Table` widget is detected, cutting dense-page
    token cost by an order of magnitude.
-4. **Diff two page maps**, making "what changed in this prototype revision" a single call.
-5. **Make the concurrency cap configurable** and report it from `/health`.
+5. **Diff two page maps**, making "what changed in this prototype revision" a single call.
+6. **Make the concurrency cap configurable** and report it from `/health`.
 
 ## Version history
 
 Version-managed prompts, audits and change records live in [`.update/`](.update/README.md).
+[README.zh-CN.md](README.zh-CN.md) is the Chinese version of this document.
 
 | Version | Change |
 |---|---|
+| 0.3.0 | Interaction recognition: `axure_get_interactions`, the `declared`/`observed`/`inferred` evidence model — [`.update/0.2.0`](.update/0.2.0/plan.md). Implemented but not yet executed; see verification status |
 | 0.2.0 | Four-layer refactor, security boundary, protocol and budget fixes — [`.update/0.1.0`](.update/0.1.0/plan.md) |
 | 0.1.0 | Initial release: three tools, canvas 1:1 fitting, region/widget scoping, stdio + HTTP |

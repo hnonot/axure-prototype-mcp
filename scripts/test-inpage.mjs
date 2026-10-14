@@ -27,9 +27,11 @@ const test = (name, fn) => {
  * this module can leak into its scope when it is compiled.
  */
 const INBOUND_BODY = `function inbound(payload) {
-  const factory = new Function(payload.declaration + '; return axureExtractOutline;')();
+  const factory = new Function(payload.declaration + '; return ' + payload.factoryName + ';')();
   return factory(payload.value);
 }`;
+
+const FACTORY_NAME = 'axureExtractOutline';
 
 const buildInbound = () =>
   // eslint-disable-next-line no-new-func
@@ -45,7 +47,7 @@ const BROWSER_GLOBALS = new Set(['document', 'window', 'getComputedStyle', 'loca
 test('the adapter in-page callback can build the extractor', () => {
   const inbound = buildInbound();
   try {
-    const result = inbound({ declaration: EXTRACT_SOURCE, value: { includeNotes: false } });
+    const result = inbound({ declaration: EXTRACT_SOURCE, value: { includeNotes: false }, factoryName: FACTORY_NAME });
     assert.equal(typeof result, 'object');
   } catch (error) {
     const missing = /ReferenceError:\s+([\w$]+) is not defined/.exec(String(error));
@@ -70,7 +72,7 @@ test('the compiled adapter does not interpolate module names into in-page code',
     for (const hit of interpolation) {
       const name = hit.replace(/[${}\s]/g, '');
       assert.ok(
-        ['declaration', 'value', 'source', 'arg'].includes(name),
+        ['declaration', 'value', 'source', 'arg', 'factoryName'].includes(name),
         `frame.evaluate interpolates "${name}", which is not in the in-page payload`,
       );
     }
@@ -98,11 +100,18 @@ test('every in-page snippet defines the axureExtractOutline convention', () => {
 
 test('the compiled adapter exposes a single in-page entry point', () => {
   const source = readFileSync(new URL('../dist/playwright/adapter.js', import.meta.url), 'utf8');
-  assert.match(source, /return axureExtractOutline;/);
+  // The factory name now travels as payload (`factoryName`), not as an interpolated constant, so
+  // the adapter cannot drift from `INPAGE_FACTORY_NAME`.
+  assert.match(source, /return \$\{factoryName\};/);
   assert.equal(
     /return \(code\);/.test(source),
     false,
     'the expression-evaluation path was removed deliberately; keep one convention',
+  );
+  assert.equal(
+    /return axureExtractOutline;/.test(source),
+    false,
+    'the name must come from the shared constant via payload, not be hard-coded here',
   );
 });
 

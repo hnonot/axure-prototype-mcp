@@ -85,7 +85,7 @@ try {
   console.log('PASS  streamable-http handshake');
 
   const { tools } = await client.listTools();
-  check('tools/list over http', tools.length === 3, tools.map((t) => t.name).join(', '));
+  check('tools/list over http', tools.length === 4, tools.map((t) => t.name).join(', '));
 
   const pages = await client.callTool({ name: 'axure_list_pages', arguments: { filter: '版本' } });
   const count = pages.structuredContent?.pages?.length ?? 0;
@@ -126,3 +126,4 @@ try {
 
 console.log(`\n${failures === 0 ? 'all http checks passed' : `${failures} http check(s) failed`}`);
 setTimeout(() => process.exit(failures === 0 ? 0 : 1), 300);
+
