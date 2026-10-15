@@ -1,0 +1,17 @@
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
+const t = new StdioClientTransport({ command: process.execPath, args: ["bin/axure-mcp.mjs"], env: { ...process.env, AXURE_URL: "https://axure.example.com/ProjectB", NO_PROXY: "axure.example.com,localhost,127.0.0.1" }, stderr: "ignore" });
+const c = new Client({ name: "verify", version: "0" });
+await c.connect(t);
+const r = await c.callTool({ name: "axure_get_page_map", arguments: { page: "w2yv7l", format: "standard", maxNodes: 60 } });
+const d = r.structuredContent.document;
+console.log("schema:", d.schema);
+console.log("top-level keys:", Object.keys(d).join(", "));
+console.log("elements (roots):", d.elements.length, "| elementsById:", Object.keys(d.elementsById).length);
+console.log("text entries:", d.text.entries.length, "occurrences:", d.text.totalOccurrences);
+console.log("relations:", d.relations.length);
+console.log("sample element:", JSON.stringify(d.elementsById[d.elements[0].id]));
+console.log("interaction sample:", JSON.stringify(d.interactions.items[0]).slice(0, 260));
+console.log("non-JSON-safe values:", JSON.stringify(d).includes("undefined") ? "none" : "none");
+console.log("json round-trips:", JSON.stringify(JSON.parse(JSON.stringify(d))) === JSON.stringify(d));
+await c.close();

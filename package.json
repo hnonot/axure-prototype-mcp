@@ -1,6 +1,6 @@
 {
   "name": "axure-prototype-mcp",
-  "version": "0.3.0",
+  "version": "0.2.1",
   "private": true,
   "type": "module",
   "description": "Standalone MCP server exposing an Axure prototype as structural, spatial, visual and interaction context for any MCP host.",
@@ -26,10 +26,11 @@
     "test": "node scripts/unittest.mjs",
     "test:security": "node scripts/test-security.mjs",
     "test:interaction": "node scripts/test-interaction.mjs && node scripts/test-interaction-source.mjs",
+    "test:standard": "node scripts/test-standard.mjs",
     "test:inpage": "node scripts/test-inpage.mjs",
     "test:e2e": "node scripts/selftest.mjs",
     "test:http": "node scripts/httptest.mjs",
-    "test:all": "npm test && npm run test:security && npm run test:interaction && npm run test:inpage && npm run test:e2e && npm run test:http",
+    "test:all": "npm test && npm run test:security && npm run test:interaction && npm run test:standard && npm run test:inpage && npm run test:e2e && npm run test:http",
     "install-browser": "playwright install chromium"
   },
   "dependencies": {

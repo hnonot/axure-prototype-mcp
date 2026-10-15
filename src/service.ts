@@ -22,17 +22,24 @@ import { AxureMcpError, DomainError, InfrastructureError, messageOf } from './er
 import type { Logger } from './logger.js';
 import { neutralizeUntrusted, resolveWithinBase, truncateWellFormed } from './security.js';
 import type { FrameHandle, PlaywrightAdapter, SessionHandle } from './playwright/adapter.js';
-import { capturePageMap, flattenOutline, parseWidgetRef } from './axure/page-map.js';
+import { capturePageMap, flattenOutline, parseWidgetRef, type CaptureOutcome } from './axure/page-map.js';
 import { readSitemap, resolvePage, type ResolvedPage } from './axure/sitemap.js';
 import { INTERACTION_SOURCE, type RawInteractionCapture } from './axure/interaction-runtime.js';
 import { analyzeInteractions } from './axure/interaction-analyzer.js';
 import { summarize } from './axure/interaction.js';
+import { standardize } from './axure/standard.js';
 import type {
+  InteractionAnalysis,
+} from './axure/interaction-analyzer.js';
+import type {
+  InteractionFact,
   InteractionRequest,
   InteractionResult,
   PageMapRequest,
   PageMapResult,
+  PageOutput,
   SitemapResult,
+  StandardDocument,
   VisualRequest,
   VisualResult,
   WidgetGeometry,
@@ -281,7 +288,7 @@ export class AxureService {
   }
 
   /** Capture one page's structure, geometry and annotations. */
-  async getPageMap(request: PageMapRequest): Promise<PageMapResult> {
+  async getPageMap(request: PageMapRequest): Promise<PageOutput> {
     const id = requestId();
     const log = this.#log.child({ requestId: id, tool: 'get_page_map', page: request.page });
     log.debug('capturing page map');
@@ -340,10 +347,121 @@ export class AxureService {
       if (!result.accessibility) delete result.accessibility;
       result.stats.nodes = flattenOutline(outline).length;
       log.debug('page map captured', { widgets: result.stats.widgets, nodes: result.stats.nodes, ms: Date.now() - started });
-      return result;
+
+      // The standard document is built from the values already captured above plus one extra pass
+      // for interactions, so asking for both shapes costs one page load rather than two.
+      if (request.format === 'standard') {
+        const analysis = await this.#readInteractions(opened.content, pageId, result.stats.widgets);
+
+        // An interaction record that names a widget the element list dropped is a dangling
+        // reference: a reader cannot tell what the interaction is *on*. So the widgets the records
+        // actually refer to are protected from the node budget. Re-capture only when the budget
+        // really did drop one, which leaves the common case at a single capture.
+        const referenced = collectInteractionWidgetIds(analysis.interactions);
+        const present = new Set(flattenOutline(outline).map((node) => node.id));
+        let finalOutline = outline;
+        let finalCaptured = captured;
+        const missing = [...referenced].filter((widgetId) => !present.has(widgetId));
+        if (missing.length > 0) {
+          finalCaptured = await capturePageMap(opened.content, effective, pageId, new Set(missing));
+          finalOutline = request.includeHidden ? finalCaptured.outline : pruneHidden(finalCaptured.outline);
+          for (const node of flattenOutline(finalOutline)) node.ref = `${pageId}#${node.id}`;
+          log.debug('re-captured to keep interaction targets', { recovered: missing.length });
+        }
+
+        const document = standardize({
+          page: {
+            id: result.page.id,
+            name: result.page.name,
+            url: result.page.url,
+            title: result.page.title,
+            type: result.page.type,
+            path: result.page.path,
+          },
+          capture: finalCaptured,
+          outline: finalOutline,
+          interactions: analysis,
+          space: request.space,
+          detail: request.detail,
+          scope: finalCaptured.scope,
+          // Passed in rather than read from the clock, so `standardize` stays pure and testable.
+          at: new Date().toISOString(),
+          notes: request.includeNotes ? result.notes : undefined,
+          widgetCount: result.stats.widgets,
+          pageStats: finalCaptured.stats,
+        });
+        log.debug('standard document built', {
+          elements: document.stats.elements,
+          relations: document.stats.relations,
+          rolesUnknown: document.stats.rolesUnknown,
+          interactionTargetsRecovered: missing.length,
+          ms: Date.now() - started,
+        });
+        return { format: 'standard', result: document };
+      }
+
+      return { format: 'outline', result };
     } finally {
       await opened.session.close();
     }
+  }
+
+  /**
+   * Read and analyze the page's interactions on an already-open frame.
+   *
+   * Shared by the interaction tool and the standard document so the two cannot drift: both get
+   * their widget counts from the same outline extractor and their evidence levels from the same
+   * analyzer.
+   */
+  async #readInteractions(
+    frame: import('./playwright/adapter.js').FrameHandle,
+    pageId: string,
+    widgetCount: number,
+  ): Promise<InteractionAnalysis> {
+    const presentWidgets = new Set<string>();
+    try {
+      const outline = await capturePageMap(
+        frame,
+        {
+          space: 'page',
+          detail: 'compact',
+          maxNodes: this.#config.maxOutlineNodes,
+          charBudget: this.#config.outlineCharBudget,
+          includeHidden: true,
+          includeAccessibility: false,
+          includeNotes: false,
+        },
+        pageId,
+      );
+      for (const node of flattenOutline(outline.outline)) presentWidgets.add(node.id);
+    } catch (error) {
+      // The outline is only needed to resolve targets; losing it degrades target resolution rather
+      // than the whole call, so it is reported as a warning and not rethrown.
+      this.#log.warn('outline unavailable while reading interactions', { message: messageOf(error) });
+    }
+
+    let capture: RawInteractionCapture;
+    try {
+      capture = await frame.run<RawInteractionCapture>(INTERACTION_SOURCE, {
+        maxWidgets: this.#config.maxInteractionWidgets,
+      });
+    } catch (error) {
+      throw new InfrastructureError('RENDER_FAILED', `interaction extraction failed: ${messageOf(error)}`, {
+        retryable: true,
+        hint: 'The content frame may have navigated or the prototype may have re-rendered mid-capture; retry the call.',
+        cause: error,
+      });
+    }
+    if (!capture?.ok) {
+      throw new InfrastructureError('RENDER_FAILED', 'the in-page interaction reader did not report success');
+    }
+
+    return analyzeInteractions(
+      capture,
+      pageId,
+      widgetCount,
+      presentWidgets.size ? (widgetId: string) => presentWidgets.has(widgetId) : undefined,
+    );
   }
 
   /**
@@ -362,7 +480,7 @@ export class AxureService {
    * appearance produces `inferred` guesses; and a source that could not be read produces a
    * stated gap rather than an empty list that would read as "this page has no interactions".
    */
-  async getInteractions(request: InteractionRequest): Promise<InteractionResult> {
+  async getInteractions(request: InteractionRequest): Promise<InteractionResult | StandardDocument> {
     const id = requestId();
     const log = this.#log.child({ requestId: id, tool: 'get_interactions', page: request.page });
     log.debug('analysing interactions');
@@ -375,11 +493,13 @@ export class AxureService {
       const warnings: string[] = [];
 
       // Widget count and presence come from the outline extractor, so the interaction result and
-      // the page map agree about what is on the page.
+      // the page map agree about what is on the page. The outline is kept for the standard format,
+      // which needs the elements themselves and not only the interaction records.
       let widgetCount = 0;
       const presentWidgets = new Set<string>();
+      let outlineCapture: CaptureOutcome | undefined;
       try {
-        const outline = await capturePageMap(
+        outlineCapture = await capturePageMap(
           frame,
           {
             space: 'page',
@@ -392,8 +512,8 @@ export class AxureService {
           },
           pageId,
         );
-        widgetCount = outline.stats.widgets;
-        for (const node of flattenOutline(outline.outline)) presentWidgets.add(node.id);
+        widgetCount = outlineCapture.stats.widgets;
+        for (const node of flattenOutline(outlineCapture.outline)) presentWidgets.add(node.id);
       } catch (error) {
         warnings.push(
           `the page outline could not be read, so widget counts and target resolution are unavailable: ${messageOf(error)}`,
@@ -455,6 +575,25 @@ export class AxureService {
         gaps: result.gaps.length,
         ms: Date.now() - started,
       });
+
+      // The same unified document `axure_get_page_map` builds with format="standard", so a caller
+      // that wants the interaction section *with* its surroundings gets the identical shape from
+      // either tool. The page outline was already captured above, so this costs no extra load.
+      if (request.format === 'standard' && outlineCapture) {
+        return standardize({
+          page: result.page,
+          capture: outlineCapture,
+          outline: outlineCapture.outline,
+          interactions: { ...analysis, interactions },
+          space: 'page',
+          detail: 'compact',
+          scope: outlineCapture.scope,
+          at: new Date().toISOString(),
+          widgetCount,
+          pageStats: outlineCapture.stats,
+        });
+      }
+
       return result;
     } finally {
       await opened.session.close();
@@ -689,6 +828,29 @@ export class AxureService {
   }
 }
 
+/**
+ * Every widget id an interaction record refers to.
+ *
+ * Collects the widget an interaction is *attached to* plus every target it names, including the
+ * resolved panel id. These are the ids that must survive the node budget so no record in the
+ * standard document points at an element the document does not contain.
+ */
+function collectInteractionWidgetIds(interactions: InteractionFact[]): Set<string> {
+  const ids = new Set<string>();
+  for (const fact of interactions) {
+    ids.add(fact.widgetId);
+    for (const branch of fact.branches ?? []) {
+      for (const action of branch.actions) {
+        if (action.panelId) ids.add(action.panelId);
+        for (const target of action.targets ?? []) {
+          if (target.widgetId) ids.add(target.widgetId);
+        }
+      }
+    }
+  }
+  return ids;
+}
+
 /** Drop widgets whose dynamic-panel state is not active. */
 function pruneHidden(nodes: PageMapResult['outline']): PageMapResult['outline'] {
   const out: PageMapResult['outline'] = [];
@@ -704,5 +866,6 @@ function pruneHidden(nodes: PageMapResult['outline']): PageMapResult['outline'] 
   }
   return out;
 }
+
 
 

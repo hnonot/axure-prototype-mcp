@@ -382,6 +382,157 @@ check(
   `kinds: ${[...masterKinds].sort().join(', ')}`,
 );
 
+// --- standardized output (axure.page/v1) -------------------------------------
+// Verified against the real deployment: the standard document must carry the same page the outline
+// tool sees, mark provenance on every value, and never present a derived role as authored.
+const stdStart = Date.now();
+const std = await call('axure_get_page_map', { page: dense.id, format: 'standard', maxNodes: 300 }, 'call axure_get_page_map');
+const stdText = std.content?.find((block) => block.type === 'text')?.text ?? '';
+writeFileSync(resolve(OUT, 'standard.md'), stdText);
+const stdDoc = std.structuredContent?.document ?? {};
+check(
+  'format=standard returns the versioned axure.page/v1 document',
+  stdDoc.schema === 'axure.page/v1',
+  `schema=${stdDoc.schema}, ${stdDoc.stats?.elements ?? 0} elements in ${Date.now() - stdStart} ms`,
+);
+check(
+  'the standard document carries the same page the outline tool reports',
+  stdDoc.page?.id === dense.id && (stdDoc.stats?.widgets ?? 0) > 0,
+  `${stdDoc.stats?.widgets} widgets, ${stdDoc.stats?.elements} elements, canvas ${stdDoc.capture?.canvas?.width}x${stdDoc.capture?.canvas?.height}`,
+);
+check(
+  'structure and interactions arrive together in one document',
+  Array.isArray(stdDoc.elements) &&
+    stdDoc.interactions !== undefined &&
+    stdDoc.interactions.stats?.byConfidence?.declared === 6 &&
+    stdDoc.stats?.interactions?.declared === 6,
+  `${stdDoc.interactions?.stats?.byConfidence?.declared} declared interactions alongside ${stdDoc.stats?.elements} elements`,
+);
+check(
+  'the hierarchy is explicit and every child resolves',
+  (() => {
+    const byId = stdDoc.elementsById ?? {};
+    const roots = stdDoc.elements ?? [];
+    if (!roots.length) return false;
+    let reachable = 0;
+    const walk = (ids, depth) => {
+      for (const id of ids) {
+        const element = byId[id];
+        if (!element) return false;
+        if (element.depth !== depth) return false;
+        reachable += 1;
+        if (walk(element.childIds ?? [], depth + 1) === false) return false;
+      }
+      return true;
+    };
+    const ok = walk(roots.map((element) => element.id), 0);
+    return ok === true && reachable === stdDoc.stats?.elements;
+  })(),
+  `${Object.keys(stdDoc.elementsById ?? {}).length} indexed, ${stdDoc.stats?.roots} root(s), depth ${stdDoc.stats?.maxDepth}`,
+);
+check(
+  'every element role states its provenance, and derived roles name their rule',
+  (stdDoc.elementsById
+    ? Object.values(stdDoc.elementsById)
+    : []
+  ).every(
+    (element) =>
+      element.role?.provenance === 'unknown' ||
+      (element.role?.provenance === 'derived' && typeof element.role.rule === 'string' && element.role.rule.length > 0),
+  ),
+  `roles: ${JSON.stringify(stdDoc.stats?.byRole ?? {})}`,
+);
+check(
+  'an unknown role carries a reason instead of a value',
+  (() => {
+    const unknown = Object.values(stdDoc.elementsById ?? {}).filter((element) => element.role?.provenance === 'unknown');
+    return unknown.length === (stdDoc.stats?.rolesUnknown ?? -1) && unknown.every((element) => element.role.value === undefined && element.role.reason);
+  })(),
+  `${stdDoc.stats?.rolesUnknown} unknown of ${stdDoc.stats?.elements}`,
+);
+check(
+  'the authored type is preserved verbatim beside the derived role',
+  Object.values(stdDoc.elementsById ?? {}).every((element) => typeof element.authoredType === 'string'),
+  'no element lost its raw type token',
+);
+check(
+  'geometry is marked derived rather than presented as authored',
+  Object.values(stdDoc.elementsById ?? {}).every((element) => element.geometry?.provenance === 'derived'),
+  `rule: ${Object.values(stdDoc.elementsById ?? {})[0]?.geometry?.rule}`,
+);
+check(
+  'relations are published with their provenance',
+  (stdDoc.relations?.length ?? 0) > 0 &&
+    stdDoc.relations.every(
+      (relation) =>
+        typeof relation.kind === 'string' &&
+        (relation.provenance === 'fact' || relation.provenance === 'derived') &&
+        typeof relation.rule === 'string',
+    ),
+  `${stdDoc.stats?.relations} relations, kinds: ${[...new Set((stdDoc.relations ?? []).map((r) => r.kind))].join(', ')}`,
+);
+check(
+  'no interaction record names a widget the element list omitted',
+  (() => {
+    const byId = stdDoc.elementsById ?? {};
+    const dangling = (stdDoc.interactions?.items ?? []).filter((fact) => !byId[fact.widgetId]);
+    return dangling.length === 0;
+  })(),
+  (() => {
+    const byId = stdDoc.elementsById ?? {};
+    const dangling = (stdDoc.interactions?.items ?? []).filter((fact) => !byId[fact.widgetId]);
+    return dangling.length === 0
+      ? `all ${(stdDoc.interactions?.items ?? []).length} records resolve within ${stdDoc.stats?.elements} elements`
+      : `${dangling.length} dangling, e.g. ${dangling.slice(0, 3).map((fact) => fact.widgetId).join(', ')}`;
+  })(),
+);
+check(
+  'no relation has a missing endpoint',
+  (stdDoc.relations ?? []).every(
+    (relation) => stdDoc.elementsById?.[relation.from] && (relation.to === undefined || stdDoc.elementsById?.[relation.to]),
+  ),
+  `${stdDoc.stats?.relations} relations checked`,
+);
+check(
+  'the text index deduplicates and reports its totals',
+  (stdDoc.text?.distinctTexts ?? 0) > 0 &&
+    stdDoc.text.totalOccurrences >= stdDoc.text.distinctTexts &&
+    (stdDoc.text.entries ?? []).every((entry) => entry.occurrences === entry.elementIds.length && entry.occurrences >= 1),
+  `${stdDoc.text?.distinctTexts} distinct of ${stdDoc.text?.totalOccurrences} occurrences, ${stdDoc.text?.droppedEmpty} dropped empty`,
+);
+check(
+  'the untrusted notice precedes all prototype text in the standard rendering',
+  /^note: all prototype-derived text/.test(stdText),
+  stdText.split('\n')[0]?.slice(0, 60) ?? '(empty)',
+);
+check(
+  'the standard rendering stays inside the character budget',
+  stdText.length <= 48_000,
+  `${stdText.length} chars for a 48000 budget`,
+);
+check(
+  'nothing is omitted without saying so',
+  // Two honest disclosures are acceptable, and both must be present in one of the two forms:
+  // the "gaps and omissions" section survives, or the budget note states how much was dropped.
+  stdDoc.omitted !== undefined &&
+    (/omissions|gaps:/.test(stdText) || /not shown|character budget/i.test(stdText)),
+  Object.keys(stdDoc.omitted ?? {}).length
+    ? `capture omitted ${JSON.stringify(stdDoc.omitted)}; ` +
+      (/omissions/.test(stdText) ? 'omissions section shown' : 'budget note shown instead')
+    : 'section present; nothing omitted',
+);
+check(
+  'the legacy outline format is unchanged by the new option',
+  (await call('axure_get_page_map', { page: dense.id, maxNodes: 40, detail: 'compact' }, 'call axure_get_page_map')).structuredContent?.outline?.length > 0,
+  'default format still returns an outline',
+);
+check(
+  'axure_get_interactions format=standard returns the same schema',
+  (await call('axure_get_interactions', { page: dense.id, format: 'standard', maxWidgets: 300 }, 'call axure_get_interactions')).structuredContent?.document
+    ?.schema === 'axure.page/v1',
+  'one schema, reachable from both tools',
+);
+
 // --- error transparency ------------------------------------------------------
 const blocked = await call('axure_get_page_map', { page: 'http://169.254.169.254/' }, 'call axure_get_page_map');
 const blockedText = blocked.content?.find((block) => block.type === 'text')?.text ?? '';

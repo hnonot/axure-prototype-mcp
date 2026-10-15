@@ -24,7 +24,8 @@ import { AxureMcpError, ERROR_CODES, messageOf } from '../errors.js';
 import { neutralizeUntrusted } from '../security.js';
 import { UNTRUSTED_NOTICE, renderPageMapWithin, renderSitemapResult, renderVisual } from '../axure/render.js';
 import { renderInteractions } from '../axure/interaction-render.js';
-import type { InteractionResult, PageMapResult, SitemapResult, VisualResult } from '../types.js';
+import { renderStandardWithin } from '../axure/standard-render.js';
+import type { InteractionResult, PageMapResult, SitemapResult, StandardDocument, VisualResult } from '../types.js';
 
 type TextBlock = { type: 'text'; text: string };
 type ImageBlock = { type: 'image'; data: string; mimeType: string };
@@ -201,6 +202,19 @@ export function interactionContent(result: InteractionResult, charBudget: number
   };
 
   return ok(text, structured);
+}
+
+/**
+ * Format a standardized document as a tool result.
+ *
+ * `structuredContent` carries the document itself, so a consumer gets the full machine-readable
+ * shape while the text stays inside the budget. That split matters here: truncating the *text* must
+ * never truncate the *data*, or a bounded response would silently lose the very facts it exists to
+ * deliver.
+ */
+export function standardContent(document: StandardDocument, charBudget: number): CallToolResult {
+  const text = renderStandardWithin(document, charBudget);
+  return ok(text, { ok: true as const, schema: document.schema, document });
 }
 
 /**

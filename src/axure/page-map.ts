@@ -270,15 +270,50 @@ export function applyScope(
  * Omitting reasons are accumulated so the response can explain what was removed rather than
  * silently returning a partial page.
  */
+/**
+ * Expand a protected set to include the ancestors of every protected node.
+ *
+ * Protecting only the named nodes is not enough: the drop passes evaluate an ancestor before its
+ * children, so a parent group holding a protected checkbox was itself removed and took the
+ * protected child with it. That produced exactly the dangling references this is meant to prevent,
+ * which is why the closure is computed here rather than checked inside the passes.
+ */
+function withAncestors(nodes: OutlineNode[], protectedIds?: ReadonlySet<string>): ReadonlySet<string> | undefined {
+  if (!protectedIds || protectedIds.size === 0) return undefined;
+  const effective = new Set(protectedIds);
+  const walk = (list: OutlineNode[], ancestors: readonly string[]): void => {
+    for (const node of list) {
+      const chain = [...ancestors, node.id];
+      if (protectedIds.has(node.id)) {
+        for (const ancestor of ancestors) effective.add(ancestor);
+      }
+      if (node.children?.length) walk(node.children, chain);
+    }
+  };
+  walk(nodes, []);
+  return effective;
+}
+
+/**
+ * Trim an outline to a node budget.
+ *
+ * @param protectedIds - widget ids that must survive the trim, together with their ancestors. The
+ *   standard document carries structure and interactions together, and an interaction record that
+ *   names a widget the element list had dropped is a dangling reference: a reader cannot tell what
+ *   the interaction is *on*.
+ */
 export function applyBudgets(
   nodes: OutlineNode[],
   maxNodes: number,
   stats: PageStats,
   omitted: Record<string, number>,
+  protectedIds?: ReadonlySet<string>,
 ): OutlineNode[] {
   let total = nodes.reduce((sum, node) => sum + countNodes(node), 0);
   if (total <= maxNodes) return nodes;
 
+  const protectedClosure = withAncestors(nodes, protectedIds);
+  const isProtected = (node: OutlineNode): boolean => protectedClosure?.has(node.id) === true;
   const clone = structuredClone(nodes) as OutlineNode[];
 
   const drop = (predicate: (node: OutlineNode) => boolean, reason: string): void => {
@@ -286,7 +321,7 @@ export function applyBudgets(
       for (let index = list.length - 1; index >= 0; index -= 1) {
         const node = list[index]!;
         if (node.children) sweep(node.children);
-        if (predicate(node) && total > maxNodes) {
+        if (predicate(node) && total > maxNodes && !isProtected(node)) {
           list.splice(index, 1);
           total -= countNodes(node);
           omitted[reason] = (omitted[reason] ?? 0) + 1;
@@ -310,12 +345,14 @@ export function applyBudgets(
   drop((node) => !node.text && !node.action && node.kind === 'shape', 'decorative-shape');
 
   if (total > maxNodes) {
-    // Last resort: keep the first maxNodes nodes in source order.
+    // Last resort: keep the first maxNodes nodes in source order, except protected ones, which are
+    // kept wherever they appear. Without that exemption the fallback would silently reintroduce the
+    // dangling references the earlier passes were careful to avoid.
     const kept: OutlineNode[] = [];
     let count = 0;
     const walk = (list: OutlineNode[]): void => {
       for (const node of list) {
-        if (count >= maxNodes) {
+        if (count >= maxNodes && !isProtected(node)) {
           omitted['node-budget'] = (omitted['node-budget'] ?? 0) + 1;
           stats.omittedNodes += 1;
           continue;
@@ -375,11 +412,15 @@ export interface CaptureOutcome {
  * @param frame - content frame of an already-navigated Axure page.
  * @param request - validated caller options.
  * @param pageId - resolved page id, used to build stable widget refs.
+ * @param protectWidgetIds - widget ids exempt from the node budget. The standard document passes
+ *   the widgets its interaction records refer to, so no record can name an element the document
+ *   omits. Passed separately from `request` because it is derived from a read, not from a caller.
  */
 export async function capturePageMap(
   frame: FrameHandle,
   request: PageMapRequest,
   pageId: string,
+  protectWidgetIds?: ReadonlySet<string>,
 ): Promise<CaptureOutcome> {
   let capture: RawCapture;
   try {
@@ -443,7 +484,7 @@ export async function capturePageMap(
 
   // Scope first, then budget: a scoped call should spend its budget on the requested area
   // rather than on trimming an already-deterministic set of unwanted nodes.
-  const bounded = applyBudgets(scoped.nodes, request.maxNodes, stats, omitted);
+  const bounded = applyBudgets(scoped.nodes, request.maxNodes, stats, omitted, protectWidgetIds);
   const recounted = collectStats(bounded);
   recounted.widgets = capture.totalWidgets;
   recounted.omittedNodes = stats.omittedNodes;

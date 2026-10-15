@@ -17,7 +17,7 @@ Host 都能获取 Axure 原型的**结构、空间、视觉与交互**信息（�
 
 英文版见 [README.md](README.md)。
 
-- [交互能力的验证状态](#交互能力的验证状态)
+- [验证状态](#验证状态)
 - [架构](#架构)
 - [工具](#工具)
   - [`axure_list_pages`](#axure_list_pages)
@@ -48,10 +48,31 @@ Host 都能获取 Axure 原型的**结构、空间、视觉与交互**信息（�
 | 单元 | `npm test` | 30/30 |
 | 安全 | `npm run test:security` | 14/14 |
 | 浏览器边界 | `npm run test:inpage` | 6/6 |
-| 交互逻辑 + 渲染 | `npm run test:interaction`（前半） | 34/34 |
+| 交互逻辑 + 渲染 | `npm run test:interaction`（前半） | 35/35 |
 | 页内读取器 | `npm run test:interaction`（后半） | 20/20 |
-| 端到端（真实原型、真实 stdio） | `npm run test:e2e` | 35/35 |
+| 标准化 | `npm run test:standard` | 36/36 |
+| 端到端（真实原型、真实 stdio） | `npm run test:e2e` | 52/52 |
 | HTTP 传输 | `npm run test:http` | 8/8 |
+
+参考原型上的实测（`format="standard"`，订单管理 `w2yv7l`）：
+
+| 指标 | 数值 |
+|---|---|
+| 提取器看到的控件 | 1119 |
+| 文档中的元素（`maxNodes=300`） | 300（131 个根节点，深度 3） |
+| 由结构证据确立的角色 | 300 / 300 |
+| 发布的关系 | 223（`contains` 169，`duplicates-text-of` 54） |
+| 文本索引 | 96 个条目 / 150 次出现 |
+| 同一次页面加载携带的交互 | 94（6 declared，88 inferred） |
+| **引用到被省略元素的交互记录** | **0** |
+| **端点缺失的关系** | **0** |
+| 上报的采集省略 | `empty-group`、`off-canvas`、`decorative-shape`、`node-budget` |
+
+最后两行是**不变量**而非偶发计数，端到端套件对它们有断言：由于承载交互的元素不受节点预算裁剪，
+读者总能把一条记录解析到它所指的元素上。
+
+关系数与文本数会随每次重新读取真实页面而轻微波动，因此视为代表性数值；
+`elements`、`roots`、角色分布与交互计数是稳定的。
 
 参考原型上的实测交互覆盖：
 
@@ -216,7 +237,109 @@ u57 table:Table @222,95 1662x890
 | `includeHidden` | boolean | 保留动态面板非活动状态的控件 |
 | `includeAccessibility` | boolean | 追加 ARIA 快照，上限为响应预算的三分之一 |
 | `includeNotes` | boolean | 设计者注释与页面备注（默认 true） |
+| `format` | `outline` \| `standard` | 见下文。默认 `outline`，保持既有形状 |
 | `viewport`、`settleMs` | | 渲染控制 |
+
+`structuredContent`：`{ ok, page{id,name,url,title,type,path}, space, pageSize, viewport, detail, stats, omitted, outline[], scope?, notes?, accessibility?, warnings[] }`
+
+#### 标准数据结构（`axure.page/v1`）
+
+`format="standard"` 返回的是一份**带版本、与模型无关的文档**，而不是扁平大纲。它回答了
+大纲回答不了的问题：*对每一个取值来说，它是原型声明的、本服务算出来的，还是谁也没能确定的？*
+它还在同一次页面加载里同时给出结构与交互，因此调用方不必自己把两个形状拼起来。
+
+```jsonc
+{
+  "schema": "axure.page/v1",              // 用于分支判断的字段
+  "page":     { "id": "w2yv7l", "name": "订单管理", "url": "...", "title": "...",
+                "authoredType": "Wireframe", "path": ["MES系统", "生产计划"] },
+  "capture":  { "space": "page", "detail": "standard",
+                "canvas":   { "width": 1920, "height": 1080 },
+                "viewport": { "width": 1440, "height": 900, "scrollX": 0, "scrollY": 0 },
+                "at": "2026-05-14T09:12:33.001Z" },
+  "elements": [ /* 只含顶层元素；子节点经 childIds 可达 */ ],
+  "elementsById": { "u575": { /* 同一批元素，以原始 id 为键 */ } },
+  "relations": [ { "id": "rel1:contains:u1->u2", "kind": "contains",
+                   "from": "u1", "to": "u2",
+                   "provenance": "derived", "rule": "structure/containment" } ],
+  "text": { "entries": [ { "text": "库存管理", "elementIds": ["u5", "u7"],
+                           "occurrences": 2, "from": "widget-text" } ],
+            "totalOccurrences": 150, "distinctTexts": 96, "droppedEmpty": 0 },
+  "interactions": { "items": [ /* 与 axure_get_interactions 返回的同一批记录 */ ],
+                    "gaps": [], "stats": { /* … */ }, "warnings": [] },
+  "stats": { "widgets": 1119, "elements": 300, "roots": 131, "maxDepth": 3,
+             "rolesKnown": 300, "rolesUnknown": 0,
+             "byRole": { "shape": 245, "input": 36, "image": 13, "container": 5,
+                         "repeating-container": 1 },
+             "relations": 223,
+             "interactions": { "total": 94, "declared": 6, "observed": 0, "inferred": 88 } },
+  "omitted": { "empty-group": 58, "off-canvas": 257, "decorative-shape": 12, "node-budget": 148 },
+  "gaps": [], "warnings": []
+}
+```
+
+上述计数来自一次真实运行；由于每次都会重新读取真实页面，关系数与文本数在运行之间会轻微波动。
+
+一个元素，以及这套形状存在的理由——出处标记：
+
+```jsonc
+{
+  "id": "u1363",                       // 原始原型 id，始终保留
+  "ref": "w2yv7l#u1363",               // 供后续调用使用的稳定句柄
+  "parentId": "u12", "childIds": ["u1364"], "depth": 2,
+  "authoredType": "Checkbox",           // 原型自己的类型 token，逐字保留
+  "role": { "value": "input",           // 由规则推导……
+            "provenance": "derived",    //（或 { "provenance": "unknown",
+            "rule": "classify/role-from-authored-type(checkbox)" },  // "reason": "unrecognized-value", "detail": "…" }）
+  "geometry": { "x": 539, "y": 375, "width": 12, "height": 16,
+                "onScreen": true, "visible": true,
+                "provenance": "derived", "rule": "capture/geometry" },
+  "text": "库存管理",
+  "interactionRefs": ["w2yv7l#u1363"]
+}
+```
+
+| 字段 | 含义 |
+|---|---|
+| `schema` | 常量 `axure.page/v1`。请据此分支，而不要靠字段是否存在来判断 |
+| `elements` | **只含顶层**元素。树由 `childIds` 表达；请遍历它，不要把 `elements` 当成扁平列表 |
+| `elementsById` | 任意深度的全部元素，以原始 id 为键。**承载交互的元素及其祖先不受 `maxNodes` 裁剪**，因此 `interactions.items` 中的每一条都能在此解析——端到端套件对此有断言；关系端点同理 |
+| `authoredType` | 原型自己的控件类型 token，永不归一化 |
+| `role` | 可辨识联合：要么 `{ value, provenance, rule }`，要么 `{ provenance: 'unknown', reason, detail }` |
+| `geometry` | 恒为 `derived`——由采集层测量并归一化 |
+| `relations[].kind` | `contains`、`targets`、`switches-state-of`、`duplicates-text-of` |
+| `relations[].provenance` | 来自项目模型时为 `fact`，由本服务推导时为 `derived` |
+| `relations[].evidence` | 对来自交互的关系，记录其 `declared`/`observed`/`inferred` 等级 |
+| `text.entries[].occurrences` | 被折叠进该条目的载体数量；`elementIds` 列出它们 |
+| `text.droppedEmpty` | 被丢弃的纯空白文本段——有计数，绝不静默消失 |
+| `omitted` | 因作用域/预算被丢弃的节点，按原因计数 |
+| `gaps` | 读不到的来源，以及消费者因此看不到什么 |
+| `stats.rolesUnknown` | 无法确定角色的元素数，等于 `byRole` 里的 `unknown` 计数 |
+
+**`structuredContent.document` 携带完整文档；只有文本渲染受预算约束。** 这一分工是刻意的：
+约束散文不能反过来把数据丢掉。
+
+#### 转换规则
+
+原始读取结果由 `src/axure/standard.ts`（纯函数）转换为上述文档。每条规则都在此列出其 id，
+因为该 id 会出现在输出里（`role.rule`、`geometry.rule`、`relations[].rule`）——
+因此任何推导值都能说出自己是**怎么**推出来的。
+
+| 规则 id | 输入 | 输出 | 说明 |
+|---|---|---|---|
+| `capture/geometry` | 提取器实测并已归一化的矩形 | `geometry.{x,y,width,height,onScreen,visible}` | 恒为 `derived`：由采集测量并取整 |
+| `capture/depth` | 提取器给出的 DOM 嵌套 | `depth`、`parentId`、`childIds` | 层级被重建为显式链接，而不是留在嵌套里靠推断 |
+| `classify/role-from-authored-type(...)` | 原型自身的 `friendlyType` 记号 | `role.value` | 固定的**结构**对照表：`Rectangle → shape`、`Dynamic Panel → state-container`、`Table → repeating-container`、`Text Field → input` 等 |
+| `classify/role-from-structure(...)` | 提取器的分类桶，或非空图片 URL | `role.value` | 仅在类型记号无法识别时使用，且只在不会误导的方向上采信：`group → container`、`input → input`、`image → image` |
+| ——（无规则适用） | 没有任何结构证据匹配 | `role = { provenance: 'unknown', reason, detail }` | 原型未给出类型时 `not-authored`；给出了但本服务未覆盖时 `unrecognized-value` |
+| `structure/containment` | 父子链接 | 每条边一个 `contains` 关系 | 每个子节点一条边，因此 `contains = elements − roots` |
+| `interaction/target` | `action.targets[].widgetId` | `targets` 关系 | 仅当目标确实存在于本文档中；无法解析的目标仍留在交互记录里，而不会被编造成一个节点 |
+| `interaction/panel-target` | 由读取器解析好的 `action.panelId` | `switches-state-of` 关系 | 交互为 `declared` 时 `provenance: fact`，否则 `derived` |
+| `text/dedup` | 完全相同的文本段 | 一个 `text.entries` 条目 + 一条 `duplicates-text-of` 关系 | 折叠会被如实上报，绝不静默 |
+
+归一化在关键处是无损的：即使 `role` 为 `unknown`，`authoredType` 仍原样保留原型记号；
+纯空白文本被丢弃**并有计数**（`text.droppedEmpty`）；被预算截断的文本在
+`textTruncated.length` 中记录未截断长度。
 
 ### `axure_get_visual`
 
@@ -244,6 +367,7 @@ u57 table:Table @222,95 1662x890
 | `page` | string | 同上 |
 | `includeInferred` | boolean | 是否包含 `inferred` 推断（默认 true） |
 | `maxWidgets` | 1–2000 | 读取模型条目的上限（默认 400） |
+| `format` | `interactions` \| `standard` | 默认 `interactions`，即下文所述形状；`standard` 返回 `axure_get_page_map` 在 `format="standard"` 下产出的同一份 `axure.page/v1` 文档 |
 | `viewport` | object | 渲染控制 |
 
 `structuredContent`：`{ ok, page, stats, interactions[], gaps[], warnings[] }`
@@ -493,14 +617,15 @@ HTTP 传输在绑定非回环地址时**绝不**允许无 token 运行。
 ```bash
 npm test                  # 30 单元：配置、领域、渲染、预算
 npm run test:security     # 14 安全：导航范围、路径约束、转义
-npm run test:interaction  # 34 交互逻辑 + 20 页内读取器 = 54
+npm run test:interaction  # 35 交互逻辑 + 20 页内读取器 = 55
+npm run test:standard     # 36 标准化：角色、出处、层级、去重、边界、循环防护
 npm run test:inpage       #  6 浏览器边界：页内约定与隔离
-npm run test:e2e          # 35 端到端：真实部署、真实 stdio
+npm run test:e2e          # 52 端到端：真实部署、真实 stdio
 npm run test:http         #  8 HTTP 传输，含鉴权门
 npm run test:all          # 全部
 ```
 
-其中三个值得解释，因为它们才是让本功能可测试的关键：
+其中四个值得解释，因为它们才是让本功能可测试的关键：
 
 `scripts/test-interaction.mjs` 不需要浏览器。证据模型、触发器与动作归一化、分支解码、
 聚合与渲染都在 `src/axure/interaction.ts` 中（纯函数），因此包括
@@ -512,8 +637,15 @@ npm run test:all          # 全部
 载荷被原样保留、**母版**交互与两条 id 桥都可用、控件上限被强制执行并上报、
 模型抛异常不会让读取器崩溃、DOM 观察不会混入模型条目。
 
+`scripts/test-standard.mjs` 覆盖转换逻辑——它是已读取数据的纯函数。其中最重要的断言是否定式
+断言：当没有结构规则可用时，角色必须是 `unknown` 而不是被猜出来的；以及 `classifyRole`
+**根本读不到**控件的名称或文本——测试用一个 `Proxy` 探测，一旦它触碰这类字段就失败。
+这把「不得仅凭组件名称或视觉外观臆造业务含义」从一句承诺变成一项检查。
+
 `npm run test:e2e` 会把交互数量与独立探针（`scripts/recon/probe-interaction-coverage.mjs`）
-的实测数字交叉比对，因此「静默退化为 0」或「凭空多出记录」都会让套件失败。
+的实测数字交叉比对，因此「静默退化为 0」或「凭空多出记录」都会让套件失败。它还断言标准文档的
+层级可被遍历、每个角色都带出处、`unknown` 角色带的是 reason 而不是 value，
+以及新增 `format` 选项没有影响既有的 `outline` 默认输出。
 
 `scripts/recon/` 保存了用于确立设计依据的一次性探针——Axure 的 ARIA 输出、运行时 API 覆盖率、
 画布缩放行为、截图策略，以及定位模型、两条 id 桥与真实动作词表的 16 个交互探针。
@@ -549,13 +681,15 @@ npm run test:all          # 全部
 
 ## 后续计划
 
-1. **对真实原型验证交互识别**，记录到底哪些模型容器与属性名承载交互数据——
-   工具链恢复后第一件要做的事。
-2. **递归 Inline Frame**，让嵌入的原型页出现在父级大纲中。
-3. **触发式采集**（`observed`）：在隔离上下文中触发一次交互并记录变化，
+1. **递归 Inline Frame**，让嵌入的原型页出现在父级大纲中。
+2. **触发式采集**（`observed`）：在隔离上下文中触发一次交互并记录变化，
    这是了解「模型只间接表达的分支结果」的唯一途径。
-4. **表格行折叠**：识别到 `Table` 控件时折叠为紧凑形式，把数据密集页的 token 成本降低一个数量级。
-5. **两版页面地图 diff**，把「这一版原型改了什么」变成一次调用。
+3. **表格行折叠**：识别到 `Table` 控件时折叠为紧凑形式，把数据密集页的 token 成本降低一个数量级。
+   标准文档的 `text.entries[].occurrences` 与 `repeating-container` 角色就是为此预留的挂钩。
+4. **两版标准文档 diff**，把「这一版原型改了什么」变成一次调用。`schema` 带版本、
+   关系 id 是确定性的，因此同一页面的两份文档可以直接比较。
+5. **为尾部小节预留预算。** 目前数据密集页的元素列表可以吃掉整个字符预算，于是
+   `## gaps and omissions` 被裁掉，只剩裁剪提示。披露本身是诚实的，但优先级顺序是错的。
 6. **让并发上限可配置**，并从 `/health` 报告。
 
 ## 版本历史
@@ -565,6 +699,9 @@ npm run test:all          # 全部
 
 | 版本 | 变更 |
 |---|---|
-| 0.3.0 | 交互识别：`axure_get_interactions`，`declared`/`observed`/`inferred` 证据模型 —— [`.update/0.2.0`](.update/0.2.0/plan.md)。已实现但尚未实际执行，见验证状态 |
-| 0.2.0 | 四层重构、安全边界、协议与预算修复 —— [`.update/0.1.0`](.update/0.1.0/plan.md) |
-| 0.1.0 | 首次发布：三个工具、画布 1:1 适配、region/widget 作用域、stdio + HTTP |
+| 0.2.1 | 标准化输出：带版本的 `axure.page/v1` 文档，逐值出处标记、显式层级与关系图、去重后的文本索引，并在一次调用中同时给出结构与交互 —— [`.update/0.2.1`](.update/0.2.1/plan.md) |
+| 0.2.0 | 交互识别：`axure_get_interactions`，`declared`/`observed`/`inferred` 证据模型 —— [`.update/0.2.0`](.update/0.2.0/plan.md) |
+| 0.1.0 | 首次发布：三个工具、画布 1:1 适配、region/widget 作用域、stdio + HTTP、四层重构 |
+
+此处的版本号与迭代目录保持一致，迭代目录是权威。早期版本的本表曾把 0.2.0 迭代标为 `0.3.0`，
+而 `package.json` 又走在其前面；现在两者都读作 `0.2.1`。

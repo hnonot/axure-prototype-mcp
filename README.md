@@ -8,7 +8,8 @@ published as a share link.
 structure + space + visual + interaction, for the same page, in one call each:
 
   axure_list_pages         -> what pages exist             (cheap discovery)
-  axure_get_page_map       -> what is where, plus text     (the workhorse)
+  axure_get_page_map       -> what is where, plus text     (the workhorse; format=standard for the
+                                                           provenance-marked document)
   axure_get_visual         -> the matching pixels          (coordinates stay aligned)
   axure_get_interactions   -> what responds to input       (facts vs. guesses, labelled)
 ```
@@ -19,10 +20,13 @@ It has no dependency on any particular host, model or client library: one `npm i
 - [Axure Prototype MCP](#axure-prototype-mcp)
   - [Architecture](#architecture)
     - [Why the outline is parsed rather than derived from ARIA](#why-the-outline-is-parsed-rather-than-derived-from-aria)
+    - [Where interaction data actually lives](#where-interaction-data-actually-lives)
     - [Relationship to MCP Resources and Prompts](#relationship-to-mcp-resources-and-prompts)
   - [Tools](#tools)
     - [`axure_list_pages`](#axure_list_pages)
     - [`axure_get_page_map`](#axure_get_page_map)
+      - [The standard document (`axure.page/v1`)](#the-standard-document-axurepagev1)
+        - [Conversion rules](#conversion-rules)
     - [`axure_get_visual`](#axure_get_visual)
     - [`axure_get_interactions`](#axure_get_interactions)
     - [Failures](#failures)
@@ -51,10 +55,34 @@ findings were cross-checked with an independent recon probe before the tool exis
 | Unit | `npm test` | 30/30 |
 | Security | `npm run test:security` | 14/14 |
 | Browser boundary | `npm run test:inpage` | 6/6 |
-| Interaction logic + rendering | `npm run test:interaction` (first) | 34/34 |
+| Interaction logic + rendering | `npm run test:interaction` (first) | 35/35 |
 | In-page reader | `npm run test:interaction` (second) | 20/20 |
-| End-to-end (live prototype, real stdio) | `npm run test:e2e` | 35/35 |
+| Standardization | `npm run test:standard` | 36/36 |
+| End-to-end (live prototype, real stdio) | `npm run test:e2e` | 52/52 |
 | HTTP transport | `npm run test:http` | 8/8 |
+
+Measured on the reference prototype, `format="standard"` for 订单管理 (`w2yv7l`) at
+`maxNodes=300`, as asserted by `npm run test:e2e`:
+
+| Metric | Value |
+|---|---|
+| Widgets the extractor saw | 1119 |
+| Elements in the document | 300 (131 roots, depth 3) |
+| Roles established from structural evidence | 300 of 300 |
+| Relations published | 223 (`contains` 169, `duplicates-text-of` 54) |
+| Interactions carried, from the same page load | 94 (6 declared, 88 inferred) |
+| Interaction records naming an omitted element | **0** |
+| Relations with a missing endpoint | **0** |
+| Text | 96 distinct of 150 occurrences |
+| Capture omissions reported | `empty-group`, `off-canvas`, `decorative-shape`, `node-budget` |
+
+The last two rows are invariants, not incidental counts, and the suite asserts them: because
+interaction-bearing elements are exempt from the node budget, a reader can always resolve a record
+to the element it is about.
+
+Exact relation and text counts vary slightly run to run (the outline is re-read from a live page),
+so treat them as representative; `elements`, `roots`, the role split and the interaction counts are
+stable.
 
 Measured interaction coverage on the reference prototype:
 
@@ -112,8 +140,8 @@ cannot quietly become another layer's concern.
 | `src/security.ts` | The one place deciding where the browser may go and what may be written | |
 | `src/config.ts` | Read and validate the environment, failing fast | contain feature logic |
 
-Inside `src/axure/`, the interaction feature is split by **what can be verified without a
-browser**, which is what made it testable while the build toolchain was unavailable:
+Inside `src/axure/`, the interaction and standardization features are split by **what can be
+verified without a browser**:
 
 | File | Role | Tested by |
 |---|---|---|
@@ -121,6 +149,13 @@ browser**, which is what made it testable while the build toolchain was unavaila
 | `interaction-source.ts` | The in-page reader, as a plain JS string | `test-interaction-source.mjs` (compiles and runs it against a synthetic model) |
 | `interaction-analyzer.ts` | Decides each record's evidence level from its source | `test-interaction.mjs` |
 | `interaction-render.ts` | Text output, keeping facts and guesses in separate sections | `test-interaction.mjs` |
+| `standard.ts` | **The parsing layer**: raw captures → the `axure.page/v1` document. Pure, takes no `FrameHandle` and does no I/O | `test-standard.mjs` (fixtures) |
+| `standard-render.ts` | Bounded text rendering of a standard document | `test-standard.mjs` (via `test:e2e` for the live shape) |
+
+`standard.ts` is the piece the 0.2.1 requirements call the 「解析层」, and its separation from the
+reading layer is what 「原始数据读取层与解析层应保持解耦」 asks for: it receives already-read data as
+arguments and returns a value, so every conversion rule — including the prohibition on inferring
+business meaning — is testable with no browser, no network and no prototype.
 
 Two consequences are worth naming, because they are what the layering buys:
 
@@ -179,7 +214,7 @@ reader merges them.
 
 ### Relationship to MCP Resources and Prompts
 
-Deliberately **not implemented**. Three tools already cover discovery → reading → seeing.
+Deliberately **not implemented**. The four tools already cover discovery → reading → seeing → interacting.
 Resources suit long-lived subscribable objects while a prototype page is an immediately-consumed
 snapshot, and Prompts target human-triggered workflows while this server's consumer is an agent.
 Adding either would enlarge the unverified surface for no capability gain. The decision is
@@ -189,7 +224,7 @@ revisited if a concrete need appears.
 
 ## Tools
 
-All three are read-only and idempotent, and every result opens with a notice that prototype-derived
+All four are read-only and idempotent, and every result opens with a notice that prototype-derived
 values are untrusted data.
 
 ### `axure_list_pages`
@@ -229,6 +264,7 @@ u57 table:Table @222,95 1662x890
 | `includeHidden` | boolean | Keep widgets whose dynamic-panel state is inactive |
 | `includeAccessibility` | boolean | Append the ARIA snapshot, capped at a third of the response budget |
 | `includeNotes` | boolean | Designer annotations and page notes (default true) |
+| `format` | `outline` \| `standard` | See below. Default `outline` keeps the legacy shape |
 | `viewport`, `settleMs` | | Rendering controls |
 
 `structuredContent`: `{ ok, page{id,name,url,title,type,path}, space, pageSize, viewport, detail, stats, omitted, outline[], scope?, notes?, accessibility?, warnings[] }`
@@ -252,6 +288,111 @@ map's coordinates.
 
 `structuredContent`: `{ ok, page, target, space, canvas, viewport, region?, widgets[], missingWidgets?, image{bytes,mimeType,attached}, savedTo?, warnings[] }`
 
+| `includeNotes` | boolean | Include designer annotations (default true) |
+| `format` | `outline` \| `standard` | Output shape. `outline` is the default and is described above; see [The standard document](#the-standard-document-axurepagev1) |
+
+#### The standard document (`axure.page/v1`)
+
+`format="standard"` returns a **versioned, model-agnostic document** instead of the flat outline.
+It answers a question the outline cannot: *for each value, is this something the prototype states,
+something this server computed, or something nobody determined?* It also returns structure and
+interactions together, from one page load, so a consumer does not have to join two shapes by hand.
+
+```jsonc
+{
+  "schema": "axure.page/v1",              // the field to branch on
+  "page":     { "id": "w2yv7l", "name": "订单管理", "url": "...", "title": "...",
+                "authoredType": "Wireframe", "path": ["MES系统", "生产计划"] },
+  "capture":  { "space": "page", "detail": "standard",
+                "canvas":   { "width": 1920, "height": 1080 },
+                "viewport": { "width": 1440, "height": 900, "scrollX": 0, "scrollY": 0 },
+                "at": "2026-05-14T09:12:33.001Z" },
+  "elements": [ /* top-level elements; children are reachable through childIds */ ],
+  "elementsById": { "u575": { /* the same elements, keyed by raw id */ } },
+  "relations": [ { "id": "rel1:contains:u1->u2", "kind": "contains",
+                   "from": "u1", "to": "u2",
+                   "provenance": "derived", "rule": "structure/containment" } ],
+  "text": { "entries": [ { "text": "库存管理", "elementIds": ["u5", "u7"],
+                           "occurrences": 2, "from": "widget-text" } ],
+            "totalOccurrences": 150, "distinctTexts": 96, "droppedEmpty": 0 },
+  "interactions": { "items": [ /* the same records axure_get_interactions returns */ ],
+                    "gaps": [], "stats": { /* … */ }, "warnings": [] },
+  "stats": { "widgets": 1119, "elements": 300, "roots": 131, "maxDepth": 3,
+             "rolesKnown": 300, "rolesUnknown": 0,
+             "byRole": { "shape": 245, "input": 36, "image": 13, "container": 5,
+                         "repeating-container": 1 },
+             "relations": 223,
+             "interactions": { "total": 94, "declared": 6, "observed": 0, "inferred": 88 } },
+  "omitted": { "empty-group": 58, "off-canvas": 257, "decorative-shape": 12, "node-budget": 148 },
+  "gaps": [], "warnings": []
+}
+```
+
+Counts are from a real run; relation and text totals move slightly between runs because the page is
+re-read live.
+
+An element, with the provenance marks that are the point of the shape:
+
+```jsonc
+{
+  "id": "u1363",                       // raw prototype id, always preserved
+  "ref": "w2yv7l#u1363",               // stable handle for follow-up calls
+  "parentId": "u12", "childIds": ["u1364"], "depth": 2,
+  "authoredType": "Checkbox",           // the prototype's own token, verbatim
+  "role": { "value": "input",           // derived…  (or { "provenance": "unknown",
+            "provenance": "derived",    //            "reason": "unrecognized-value",
+            "rule": "classify/role-from-authored-type(checkbox)" },  // "detail": "…" })
+  "geometry": { "x": 539, "y": 375, "width": 12, "height": 16,
+                "onScreen": true, "visible": true,
+                "provenance": "derived", "rule": "capture/geometry" },
+  "text": "库存管理",
+  "interactionRefs": ["w2yv7l#u1363"]
+}
+```
+
+| Field | Meaning |
+|---|---|
+| `schema` | Constant `axure.page/v1`. Branch on this, not on field presence |
+| `elements` | **Top-level** elements only. The tree is `childIds`; walk it, do not read `elements` as a flat list |
+| `elementsById` | Every element at any depth, keyed by raw id. Interaction-bearing elements and their ancestors are exempt from `maxNodes`, so every entry in `interactions.items` resolves here — the e2e suite asserts that. A relation endpoint always resolves too |
+| `authoredType` | The prototype's own widget type token, never normalized |
+| `role` | A discriminated union. Either `{ value, provenance, rule }`, or `{ provenance: 'unknown', reason, detail }` |
+| `geometry` | Always `derived` — the capture measured and normalized it |
+| `relations[].kind` | `contains`, `targets`, `switches-state-of`, `duplicates-text-of` |
+| `relations[].provenance` | `fact` when it comes from the project model, `derived` when this server worked it out |
+| `relations[].evidence` | For interaction-derived relations, the record's `declared`/`observed`/`inferred` level |
+| `text.entries[].occurrences` | How many carriers were collapsed into one entry. `elementIds` lists them |
+| `text.droppedEmpty` | Whitespace-only runs that were discarded — counted, never silently lost |
+| `omitted` | Nodes dropped by scoping/budgeting, by reason |
+| `gaps` | Sources that could not be read, and what a consumer therefore cannot see |
+| `stats.rolesUnknown` | How many elements have no determinable role. Equal to the `unknown` count in `byRole` |
+
+**`structuredContent.document` carries the whole document; only the text rendering is budgeted.**
+That split is deliberate: bounding the prose must never lose the data.
+
+#### Conversion rules
+
+The raw read is turned into the document above by `src/axure/standard.ts`, a pure function. Every
+rule is listed here with its id, because that id appears in the output as `role.rule`,
+`geometry.rule` or `relations[].rule` — so a derived value always names how it was derived.
+
+| Rule id | Input | Output | Notes |
+|---|---|---|---|
+| `capture/geometry` | the extractor's measured rect, already normalized | `geometry.{x,y,width,height,onScreen,visible}` | Always `derived`: the capture measured and rounded it |
+| `capture/depth` | DOM nesting from the extractor | `depth`, `parentId`, `childIds` | The hierarchy is rebuilt as explicit links rather than left implicit in nesting |
+| `classify/role-from-authored-type(...)` | the prototype's own `friendlyType` token | `role.value` | A fixed structural table: `Rectangle → shape`, `Dynamic Panel → state-container`, `Table → repeating-container`, `Text Field → input`, … |
+| `classify/role-from-structure(...)` | the extractor's bucket, or a non-empty image URL | `role.value` | Used only when the type token is unrecognized, and trusted only where it cannot mislead: `group → container`, `input → input`, `image → image` |
+| — (no rule applies) | nothing structural matched | `role = { provenance: 'unknown', reason, detail }` | `not-authored` when the prototype named no type; `unrecognized-value` when it named one this server does not cover |
+| `structure/containment` | parent/child links | a `contains` relation per edge | One edge per child, so `contains = elements − roots` |
+| `interaction/target` | `action.targets[].widgetId` | a `targets` relation | Only when the target exists in this document; an unresolvable target stays visible in the interaction record instead of becoming a fabricated node |
+| `interaction/panel-target` | `action.panelId`, already resolved by the reader | a `switches-state-of` relation | `provenance: fact` when the interaction is `declared`, `derived` otherwise |
+| `text/dedup` | identical text runs | one `text.entries` bucket plus a `duplicates-text-of` relation | The collapse is reported, never silent |
+
+Normalization is lossless where it matters: `authoredType` keeps the prototype's token verbatim
+even when `role` is `unknown`; whitespace-only text is dropped **and counted** in
+`text.droppedEmpty`; and text clipped by a budget records its untruncated length in
+`textTruncated.length`.
+
 ### `axure_get_interactions`
 
 Reports which widgets respond to input, and what each one does. Triggers and actions are read
@@ -262,6 +403,7 @@ from the project model, never guessed from appearance.
 | `page` | string | As above |
 | `includeInferred` | boolean | Include `inferred` guesses (default true) |
 | `maxWidgets` | 1–2000 | Cap on model entries read (default 400) |
+| `format` | `interactions` \| `standard` | `interactions` is the default and is described below; `standard` returns the same `axure.page/v1` document `axure_get_page_map` produces |
 | `viewport` | object | Rendering control |
 
 `structuredContent`: `{ ok, page, stats, interactions[], gaps[], warnings[] }`
@@ -345,7 +487,7 @@ npx playwright install chromium     # once
 npm run build
 
 node bin/axure-mcp.mjs                          # stdio (default)
-node bin/axure-mcp.mjs --http                   # Streamable HTTP on 127.0.0.1:7458
+node bin/axure-mcp.mjs --http                   # Streamable HTTP on 127.0.0.1:3333
 node bin/axure-mcp.mjs --help                   # full option and env reference
 node --env-file=.env bin/axure-mcp.mjs          # load configuration from a file
 ```
@@ -429,8 +571,8 @@ code and no private API, so the same binary keeps working with any other client.
 plugin_manager action=install_bundle target=E:\dsh-mcp\axure-mcp-dsh-bundle
 ```
 
-Tools appear as `mcp__axure__axure_list_pages`, `mcp__axure__axure_get_page_map` and
-`mcp__axure__axure_get_visual`.
+Tools appear as `mcp__axure__axure_list_pages`, `mcp__axure__axure_get_page_map`,
+`mcp__axure__axure_get_visual` and `mcp__axure__axure_get_interactions`.
 
 > DSH keeps one stdio child alive and re-reads tool **schemas** from it, but keeps running the old
 > **code**. After changing server behaviour, toggle the bundle off and on again.
@@ -523,14 +665,15 @@ The tools are designed so a weak client degrades rather than breaks.
 ```bash
 npm test                  # 30 unit: config, security-independent domain, rendering, budgets
 npm run test:security     # 14 security: navigation scope, path confinement, escaping
-npm run test:interaction  # 34 interaction logic + 20 in-page reader = 54
+npm run test:interaction  # 35 interaction logic + 20 in-page reader = 55
+npm run test:standard     # 36 standardization: roles, provenance, hierarchy, dedup, bounding
 npm run test:inpage       #  6 browser-boundary: in-page convention and isolation
-npm run test:e2e          # 35 end-to-end against the live deployment, over real stdio
+npm run test:e2e          # 52 end-to-end against the live deployment, over real stdio
 npm run test:http         #  8 HTTP transport, including the authentication gate
 npm run test:all          # everything
 ```
 
-Three of these are worth explaining, because they are what makes this feature testable.
+Four of these are worth explaining, because they are what makes this feature testable.
 
 `scripts/test-interaction.mjs` needs no browser. The evidence model, trigger and action
 normalization, branch decoding, aggregation and rendering all live in `src/axure/interaction.ts`,
@@ -544,9 +687,17 @@ self-containment, that a missing model produces a stated gap instead of a bare e
 payloads are preserved verbatim, that **master** interactions and both id bridges work, that the
 widget cap is enforced and reported, and that a model which throws does not crash the reader.
 
+`scripts/test-standard.mjs` covers the conversion, which is a pure function of already-read data.
+Its most important assertions are negative ones: that a role is `unknown` rather than guessed when
+no structural rule applies, and that `classifyRole` cannot read a widget's name or text at all — it
+is probed with a `Proxy` and the test fails if it touches such a field. That turns
+「不得仅凭组件名称或视觉外观臆造业务含义」 from a promise into a check.
+
 `npm run test:e2e` cross-checks the interaction counts against numbers measured by an independent
 recon probe (`scripts/recon/probe-interaction-coverage.mjs`), so a silent regression to zero or a
-surge of invented records both fail the suite.
+surge of invented records both fail the suite. It also asserts that the standard document's
+hierarchy is walkable, that every role carries provenance, that an `unknown` role has a reason
+instead of a value, and that the legacy `outline` default is unaffected by the new option.
 
 `scripts/recon/` holds the throwaway probes used to establish the findings behind the design —
 Axure's ARIA output, runtime API coverage, canvas scaling behaviour, screenshot strategies, and the
@@ -584,19 +735,39 @@ They document *why* the implementation looks the way it does and are not part of
 - **No authentication against the prototype.** It reads whatever the share link exposes
   anonymously; a password-protected prototype would need a login step that is not implemented.
 - **Concurrency is capped at 4 browser contexts** per process, and the cap is not configurable.
+- **Roles are structural, never semantic.** The standard document reports `input`, `shape`,
+  `state-container` and so on, derived only from the authored widget type, a form tag or an image
+  asset. It will not tell you that a widget is "a submit button for the order form". A widget named
+  订单管理 is not thereby an order-management component, and a `Rectangle` with a pointer cursor is
+  not thereby a button. Where no structural rule applies the role is `unknown` with a reason, and the
+  authored type is always preserved beside it. This is a deliberate boundary, not a gap to be closed
+  by a cleverer heuristic.
+- **Duplicate subtrees are not merged.** Two identical-looking widgets are two widgets: they have
+  different ids and may be genuinely distinct. What is deduplicated is *text*, through
+  `text.entries[].occurrences`, with a `duplicates-text-of` relation recording what was collapsed.
+  Merging elements instead would destroy exactly the information this layer exists to preserve.
+- **`structuredContent` is bounded by `maxNodes`, not by the character budget.** Only the text
+  rendering is text-budgeted, so a consumer always receives the whole document while a model's
+  context is protected. Raise `maxNodes` deliberately, not by accident.
+- **A dense page's element list can consume the whole text budget**, in which case the
+  `## gaps and omissions` section is dropped and only the trim note is shown. The omission is
+  disclosed, but the priority order is wrong; see [Next steps](#next-steps).
 
 ## Next steps
 
-1. **Verify interaction recognition against a live prototype** and record which model containers
-   and property names actually carry interaction data — the first thing to do once the toolchain
-   is available.
-2. **Recurse into inline frames** so embedded prototype pages appear in the parent outline.
-3. **Trigger-driven capture** (`observed`): fire one interaction in an isolated context and record
+1. **Recurse into inline frames** so embedded prototype pages appear in the parent outline.
+2. **Trigger-driven capture** (`observed`): fire one interaction in an isolated context and record
    what changed, which is the only way to learn a branch outcome that the model expresses
    indirectly.
-4. **Collapse table rows** into a compact form when a `Table` widget is detected, cutting dense-page
-   token cost by an order of magnitude.
-5. **Diff two page maps**, making "what changed in this prototype revision" a single call.
+3. **Collapse table rows** into a compact form when a `Table` widget is detected, cutting dense-page
+   token cost by an order of magnitude. The standard document's `text.entries[].occurrences` and
+   `repeating-container` role are the hooks for this.
+4. **Diff two standard documents**, making "what changed in this prototype revision" a single call.
+   `schema` is versioned and relation ids are deterministic, so two documents from one page are
+   directly comparable.
+5. **Reserve budget for the tail sections.** Today a dense page's element list can consume the whole
+   character budget, so `## gaps and omissions` is dropped and only the trim note appears. The
+   disclosure is honest but the priority order is wrong.
 6. **Make the concurrency cap configurable** and report it from `/health`.
 
 ## Version history
@@ -606,6 +777,10 @@ Version-managed prompts, audits and change records live in [`.update/`](.update/
 
 | Version | Change |
 |---|---|
-| 0.3.0 | Interaction recognition: `axure_get_interactions`, the `declared`/`observed`/`inferred` evidence model — [`.update/0.2.0`](.update/0.2.0/plan.md). Implemented but not yet executed; see verification status |
-| 0.2.0 | Four-layer refactor, security boundary, protocol and budget fixes — [`.update/0.1.0`](.update/0.1.0/plan.md) |
-| 0.1.0 | Initial release: three tools, canvas 1:1 fitting, region/widget scoping, stdio + HTTP |
+| 0.2.1 | Standardized output: the versioned `axure.page/v1` document with per-value provenance, an explicit hierarchy and relation graph, a deduplicated text index, and structure + interactions in one call — [`.update/0.2.1`](.update/0.2.1/plan.md) |
+| 0.2.0 | Interaction recognition: `axure_get_interactions`, the `declared`/`observed`/`inferred` evidence model — [`.update/0.2.0`](.update/0.2.0/plan.md) |
+| 0.1.0 | Initial release: three tools, canvas 1:1 fitting, region/widget scoping, stdio + HTTP, four-layer refactor |
+
+The version recorded here tracks the iteration directory, which is the authority. Earlier revisions
+of this table labelled the 0.2.0 iteration `0.3.0` while `package.json` moved ahead of it; both now
+read `0.2.1`.

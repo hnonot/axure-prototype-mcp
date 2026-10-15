@@ -17,10 +17,25 @@ import type { AxureConfig } from '../config.js';
 import type { AxureService } from '../service.js';
 import type { Logger } from '../logger.js';
 import { TOOL_NAMES } from './names.js';
-import { errorContent, interactionContent, pageMapContent, sitemapContent, visualContent } from './format.js';
-import type { InteractionRequest, PageMapRequest, VisualRequest } from '../types.js';
+import { errorContent, interactionContent, pageMapContent, sitemapContent, standardContent, visualContent } from './format.js';
+import { STANDARD_SCHEMA } from '../axure/standard.js';
+import type { InteractionRequest, PageMapRequest, StandardDocument, VisualRequest } from '../types.js';
 
 export { TOOL_NAMES } from './names.js';
+
+/**
+ * Distinguish the standard document from a legacy result at the boundary.
+ *
+ * Branches on the versioned `schema` field rather than on a structural guess, so the check keeps
+ * working when either shape gains optional fields.
+ */
+function isStandardDocument(value: unknown): value is StandardDocument {
+  return (
+    typeof value === 'object' &&
+    value !== null &&
+    (value as { schema?: unknown }).schema === STANDARD_SCHEMA
+  );
+}
 
 /** Everything the handlers need; no Playwright type appears here. */
 export interface ToolContext {
@@ -197,6 +212,16 @@ export function registerTools(server: McpServer, context: ToolContext): void {
               'a third of the response budget. Enable it only to compare against the parsed outline, not to read the page.',
           ),
         includeNotes: z.boolean().optional().describe('Include designer annotations/page notes attached to widgets (default true).'),
+        format: z
+          .enum(['outline', 'standard'])
+          .optional()
+          .describe(
+            'Output shape. "outline" (default) is the flat outline described above. "standard" returns the versioned ' +
+              'axure.page/v1 document for the same page: explicit parent/child and relation graph, a deduplicated text ' +
+              'index, per-value provenance (fact / derived / unknown) so you can tell authored data from computed values ' +
+              'from what nobody determined, and the page interactions — all from one page load. Prefer "standard" when ' +
+              'another agent will reason over the result; prefer "outline" for a compact structural listing.',
+          ),
         viewport: viewportSchema,
         settleMs: settleMsSchema,
       },
@@ -206,6 +231,7 @@ export function registerTools(server: McpServer, context: ToolContext): void {
     async (args) => {
       const log = context.log.child({ tool: 'get_page_map' });
       try {
+        const format = args.format ?? 'outline';
         const request: PageMapRequest = {
           page: args.page,
           space: args.space ?? 'page',
@@ -219,9 +245,13 @@ export function registerTools(server: McpServer, context: ToolContext): void {
           widgetIds: args.widgetIds,
           onScreenOnly: args.onScreenOnly,
           viewport: args.viewport,
+          format,
         };
-        const result = await context.service.getPageMap(request);
-        return pageMapContent(result, context.config.outlineCharBudget);
+        const output = await context.service.getPageMap(request);
+        if (output.format === 'standard') {
+          return standardContent(output.result, context.config.outlineCharBudget);
+        }
+        return pageMapContent(output.result, context.config.outlineCharBudget);
       } catch (error) {
         log.warn('get_page_map failed', { error: String(error) });
         return errorContent(error);
@@ -356,6 +386,14 @@ export function registerTools(server: McpServer, context: ToolContext): void {
           .max(2_000)
           .optional()
           .describe('Cap on model entries read (default 400). Lower it to bound a very large response.'),
+        format: z
+          .enum(['interactions', 'standard'])
+          .optional()
+          .describe(
+            'Output shape. "interactions" (default) lists the interaction records described above. "standard" returns ' +
+              'the versioned axure.page/v1 document — the same shape axure_get_page_map produces with format="standard" ' +
+              '— so the interactions arrive together with the elements and relations they refer to.',
+          ),
         viewport: viewportSchema,
       },
       outputSchema: outputShape,
@@ -364,13 +402,18 @@ export function registerTools(server: McpServer, context: ToolContext): void {
     async (args) => {
       const log = context.log.child({ tool: 'get_interactions' });
       try {
+        const format = args.format ?? 'interactions';
         const request: InteractionRequest = {
           page: args.page,
           includeInferred: args.includeInferred ?? true,
           maxWidgets: args.maxWidgets ?? 400,
           viewport: args.viewport,
+          format: format === 'standard' ? 'standard' : 'outline',
         };
         const result = await context.service.getInteractions(request);
+        if (isStandardDocument(result)) {
+          return standardContent(result, context.config.outlineCharBudget);
+        }
         return interactionContent(result, context.config.outlineCharBudget);
       } catch (error) {
         log.warn('get_interactions failed', { error: String(error) });

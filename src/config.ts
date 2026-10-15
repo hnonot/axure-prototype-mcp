@@ -46,6 +46,13 @@ export interface AxureConfig {
   readonly outlineCharBudget: number;
   /** Hard cap on outline nodes, regardless of the byte budget. */
   readonly maxOutlineNodes: number;
+  /**
+   * Hard cap on widgets read from the project model when reading interactions.
+   *
+   * Interaction data is far sparser than the outline (6 of 1119 widgets on the reference dense
+   * page), so this bounds a hostile or misauthored page without discarding real content.
+   */
+  readonly maxInteractionWidgets: number;
   /** Hard cap on widgets returned by one call. */
   readonly maxWidgetIds: number;
   /** Hard cap on sitemap pages returned by one call. */
@@ -85,6 +92,7 @@ export const CONFIG_DEFAULTS = {
   AXURE_SETTLE_MS: 4_000,
   AXURE_OUTLINE_CHAR_BUDGET: 48_000,
   AXURE_MAX_OUTLINE_NODES: 1_200,
+  AXURE_MAX_INTERACTION_WIDGETS: 400,
   AXURE_MAX_WIDGET_IDS: 40,
   AXURE_MAX_PAGES: 500,
   AXURE_BROWSER_IDLE_MS: 300_000,
@@ -105,6 +113,7 @@ const LIMITS = {
   settleMs: { min: 0, max: 120_000 },
   outlineCharBudget: { min: 1_000, max: 400_000 },
   maxOutlineNodes: { min: 20, max: 20_000 },
+  maxInteractionWidgets: { min: 1, max: 5_000 },
   maxWidgetIds: { min: 1, max: 200 },
   maxPages: { min: 1, max: 5_000 },
   browserIdleMs: { min: 0, max: 86_400_000 },
@@ -211,6 +220,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AxureConfig {
     settleMs: readInt(env.AXURE_SETTLE_MS, CONFIG_DEFAULTS.AXURE_SETTLE_MS, 'AXURE_SETTLE_MS', LIMITS.settleMs, problems),
     outlineCharBudget: readInt(env.AXURE_OUTLINE_CHAR_BUDGET, CONFIG_DEFAULTS.AXURE_OUTLINE_CHAR_BUDGET, 'AXURE_OUTLINE_CHAR_BUDGET', LIMITS.outlineCharBudget, problems),
     maxOutlineNodes: readInt(env.AXURE_MAX_OUTLINE_NODES, CONFIG_DEFAULTS.AXURE_MAX_OUTLINE_NODES, 'AXURE_MAX_OUTLINE_NODES', LIMITS.maxOutlineNodes, problems),
+    maxInteractionWidgets: readInt(env.AXURE_MAX_INTERACTION_WIDGETS, CONFIG_DEFAULTS.AXURE_MAX_INTERACTION_WIDGETS, 'AXURE_MAX_INTERACTION_WIDGETS', LIMITS.maxInteractionWidgets, problems),
     maxWidgetIds: readInt(env.AXURE_MAX_WIDGET_IDS, CONFIG_DEFAULTS.AXURE_MAX_WIDGET_IDS, 'AXURE_MAX_WIDGET_IDS', LIMITS.maxWidgetIds, problems),
     maxPages: readInt(env.AXURE_MAX_PAGES, CONFIG_DEFAULTS.AXURE_MAX_PAGES, 'AXURE_MAX_PAGES', LIMITS.maxPages, problems),
     browserIdleMs: readInt(env.AXURE_BROWSER_IDLE_MS, CONFIG_DEFAULTS.AXURE_BROWSER_IDLE_MS, 'AXURE_BROWSER_IDLE_MS', LIMITS.browserIdleMs, problems),
