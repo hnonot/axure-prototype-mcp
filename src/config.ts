@@ -80,7 +80,16 @@ const LOG_LEVELS = ['debug', 'info', 'warn', 'error'] as const;
 
 /** Defaults, in one table so the README and the code cannot drift apart. */
 export const CONFIG_DEFAULTS = {
-  AXURE_URL: 'https://axure.example.com/ProjectB',
+  /**
+   * Deliberately **absent**.
+   *
+   * `AXURE_URL` names a specific deployment, so it is the one value this project has no safe
+   * default for. It used to default to a concrete internal prototype, and that produced a real
+   * bug: an operator who changed the address in `.env` (or who never set it at all) was silently
+   * served a *different* prototype, with no error to explain it. The type below therefore omits
+   * it, and {@link loadConfig} fails when it is missing — see `CONFIG_DEFAULTS.AXURE_URL` being
+   * undefined as the type-level statement of "there is no default address".
+   */
   AXURE_HEADLESS: true,
   AXURE_VIEWPORT_WIDTH: 1440,
   AXURE_VIEWPORT_HEIGHT: 900,
@@ -96,7 +105,7 @@ export const CONFIG_DEFAULTS = {
   AXURE_MAX_WIDGET_IDS: 40,
   AXURE_MAX_PAGES: 500,
   AXURE_BROWSER_IDLE_MS: 300_000,
-  AXURE_NO_PROXY: 'axure.example.com,localhost,127.0.0.1,::1',
+  AXURE_NO_PROXY: 'localhost,127.0.0.1,::1',
   AXURE_SCREENSHOT_DIR: '.axure-mcp/shots',
   AXURE_LOG_LEVEL: 'info',
 } as const;
@@ -181,26 +190,36 @@ export function splitAxureUrl(rawUrl: string): { origin: string; projectPath: st
 /**
  * Read and validate configuration from the environment.
  *
- * @throws ConfigError listing every invalid value, so one run fixes them all.
+ * @throws ConfigError listing every invalid value, so one run fixes them all. A missing
+ *   `AXURE_URL` is one of those problems, not a fallback: see `CONFIG_DEFAULTS`.
  */
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): AxureConfig {
   const problems = new ConfigProblems();
 
-  const rawBase = env.AXURE_URL?.trim() || CONFIG_DEFAULTS.AXURE_URL;
+  const rawBase = env.AXURE_URL?.trim() ?? '';
   let origin = '';
   let projectPath = '';
-  try {
-    const parsed = new URL(rawBase);
-    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
-      problems.add('AXURE_URL', `expected an http(s) URL, got protocol ${JSON.stringify(parsed.protocol)}`);
-    } else if (!parsed.hostname) {
-      problems.add('AXURE_URL', 'expected a hostname');
-    } else {
-      origin = parsed.origin;
-      projectPath = stripTrailingSlash(parsed.pathname);
+  if (!rawBase) {
+    problems.add(
+      'AXURE_URL',
+      'is required and has no default. Set it to the Axure share/publish URL of the prototype you want to read, ' +
+        'e.g. AXURE_URL=https://axure.example.com/MyProject. To change prototypes per conversation instead of ' +
+        'editing configuration, call the axure_use_prototype tool.',
+    );
+  } else {
+    try {
+      const parsed = new URL(rawBase);
+      if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+        problems.add('AXURE_URL', `expected an http(s) URL, got protocol ${JSON.stringify(parsed.protocol)}`);
+      } else if (!parsed.hostname) {
+        problems.add('AXURE_URL', 'expected a hostname');
+      } else {
+        origin = parsed.origin;
+        projectPath = stripTrailingSlash(parsed.pathname);
+      }
+    } catch {
+      problems.add('AXURE_URL', `not a valid absolute URL: ${JSON.stringify(rawBase)}`);
     }
-  } catch {
-    problems.add('AXURE_URL', `not a valid absolute URL: ${JSON.stringify(rawBase)}`);
   }
   const baseUrl = origin ? `${origin}${projectPath}` : '';
 

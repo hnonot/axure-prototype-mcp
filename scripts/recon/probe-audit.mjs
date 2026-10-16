@@ -1,4 +1,5 @@
 /** Throwaway probe: verify audit claim D1 (malformed AXURE_URL crashes at startup). */
+import { BASE } from './_env.mjs';
 import { loadConfig } from '../../dist/config.js';
 import { resolvePageUrl } from '../../dist/axure-doc.js';
 
@@ -16,7 +17,7 @@ const big = loadConfig({ AXURE_VIEWPORT_WIDTH: '99999999', AXURE_VIEWPORT_HEIGHT
 console.log('accepted:', big.viewportWidth, big.viewportHeight);
 
 console.log('\n--- SSRF / origin escape (A1, A3) ---');
-const config = loadConfig({ AXURE_URL: 'https://axure.example.com/ProjectB' });
+const config = loadConfig({ AXURE_URL: BASE });
 const sitemap = {
   projectName: 'p', baseUrl: config.baseUrl, generatedAt: '', pageCount: 0, folderCount: 0, pages: [], folders: [],
 };

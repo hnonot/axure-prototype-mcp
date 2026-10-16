@@ -19,7 +19,7 @@ import { chromium, type Browser, type BrowserContext, type Frame, type Page } fr
 import type { AxureConfig } from '../config.js';
 import { InfrastructureError, messageOf } from '../errors.js';
 import type { Logger } from '../logger.js';
-import { assertNavigable, permittedHosts } from '../security.js';
+import { assertNavigable, permittedHosts, type NavigationBoundary } from '../security.js';
 import { INPAGE_FACTORY_NAME } from '../axure/inpage.js';
 
 /**
@@ -52,8 +52,16 @@ export interface SessionHandle {
   contentFrame(): Promise<FrameHandle>;
   /** Frame that owns the project document model (the share shell). */
   shellFrame(): Promise<FrameHandle>;
-  /** Navigate to an absolute URL that has already passed the security check. */
-  navigate(url: string): Promise<{ status: number }>;
+  /**
+   * Navigate to an absolute URL.
+   *
+   * @param allowUnverifiedHost - set **only** by the prototype-verification flow, which has to reach
+   *   a host that is not yet on the boundary in order to decide whether it should be. Every other
+   *   caller leaves it unset, so a URL still has to pass {@link assertNavigable}. The flow that sets
+   *   it also supplies the request guard's temporary allowance, so an unverified host cannot be used
+   *   to fetch anything beyond the page being verified.
+   */
+  navigate(url: string, allowUnverifiedHost?: boolean): Promise<{ status: number }>;
   /** Resize the viewport, used to render the canvas at 1:1. */
   setViewportSize(size: { width: number; height: number }): Promise<void>;
   /** Screenshot the whole page, optionally clipped to a region in page coordinates. */
@@ -62,6 +70,14 @@ export interface SessionHandle {
   url(): string;
   /** Wait for a fixed duration. */
   wait(ms: number): Promise<void>;
+  /**
+   * Compile `declaration` in every frame and return each result, with failures reported as `null`
+   * rather than thrown.
+   *
+   * Used by prototype verification, which must ask *all* frames: an Axure share link keeps the
+   * runtime in one frame and the widgets in another, and only one of them proves the host is Axure.
+   */
+  probeFrames<T>(declaration: string): Promise<Array<T | null>>;
   /** Release the context. Idempotent. */
   close(): Promise<void>;
 }
@@ -104,11 +120,114 @@ export class PlaywrightAdapter {
   #idleTimer: NodeJS.Timeout | null = null;
   #disposed = false;
   #openSessions = 0;
+  /**
+   * Hosts admitted because a caller supplied the address and it was verified to serve an Axure
+   * prototype.
+   *
+   * The adapter is the only object that outlives a single tool call in *both* transports (HTTP
+   * builds one protocol instance per request and shares this adapter), so the runtime-chosen
+   * prototype lives here. That is what makes "point at another prototype, then keep reading it"
+   * work without editing `.env`.
+   */
+  readonly #verifiedHosts = new Set<string>();
+  /** The prototype chosen at runtime, if a caller has chosen one. */
+  #activePrototype: { baseUrl: string; host: string } | null = null;
+
+  /**
+   * A host temporarily reachable *only* so it can be verified.
+   *
+   * Verifying a caller-supplied address requires fetching it, and the request guard would otherwise
+   * abort that very fetch. The allowance is a single host, set immediately before the probe and
+   * cleared in a `finally`, so it cannot widen into a lasting hole: if verification fails, the host
+   * is reachable only for the duration of the attempt that already happened.
+   */
+  #probeHost: string | null = null;
+
+  /** Permit one host for the duration of a verification attempt. */
+  beginProbe(host: string): void {
+    this.#probeHost = host.trim().toLowerCase() || null;
+  }
+
+  /** Withdraw the probe allowance. Safe to call when there is none. */
+  endProbe(): void {
+    this.#probeHost = null;
+  }
 
   constructor(config: AxureConfig, log: Logger, options?: { maxConcurrentSessions?: number }) {
     this.#config = config;
     this.#log = log;
     this.#semaphore = new Semaphore(options?.maxConcurrentSessions ?? 4);
+  }
+
+  /**
+   * The hosts the browser may currently reach.
+   *
+   * Read on every request guard evaluation rather than captured once, so a prototype verified a
+   * moment ago is reachable immediately and a fresh context is not needed.
+   */
+  #boundary(): NavigationBoundary {
+    return {
+      baseUrl: this.#config.baseUrl,
+      allowedHosts: this.#config.allowedHosts,
+      verifiedHosts: [...this.#verifiedHosts],
+    };
+  }
+
+  /** The full boundary, for a caller that needs to resolve its own page references. */
+  boundary(): NavigationBoundary {
+    return this.#boundary();
+  }
+
+  /**
+   * The prototype a caller chose at runtime, if any.
+   *
+   * `undefined` means "no choice was made", in which case callers fall back to `AXURE_URL`. Kept
+   * distinct from an empty string so "not chosen" and "chosen but empty" cannot be confused.
+   */
+  activeBaseUrl(): string | undefined {
+    return this.#activePrototype?.baseUrl;
+  }
+
+  /**
+   * Adopt a verified prototype for subsequent calls.
+   *
+   * Only called after the Axure-runtime probe succeeded, so the host is admitted on evidence rather
+   * than on the caller's say-so.
+   */
+  adoptPrototype(baseUrl: string): void {
+    const trimmed = baseUrl.trim().replace(/\/+$/, '');
+    if (!trimmed) return;
+    this.#activePrototype = { baseUrl: trimmed, host: new URL(trimmed).host.toLowerCase() };
+    this.#log.info('active prototype set', { baseUrl: trimmed });
+  }
+
+  /** The host of the runtime-chosen prototype, for reporting. */
+  activePrototypeHost(): string | undefined {
+    return this.#activePrototype?.host;
+  }
+
+  /**
+   * Record a host as verified.
+   *
+   * Called only after {@link AXURE_URL_PROBE} confirmed an Axure runtime, so this is evidence and
+   * not a caller assertion. Idempotent.
+   */
+  trustVerifiedHost(host: string): void {
+    const normalized = host.trim().toLowerCase();
+    if (!normalized) return;
+    if (this.#verifiedHosts.has(normalized)) return;
+    this.#verifiedHosts.add(normalized);
+    this.#log.info('prototype host verified and admitted', { host: normalized });
+  }
+
+  /** Whether a host is currently reachable. */
+  isHostTrusted(host: string): boolean {
+    return permittedHosts(this.#boundary()).includes(host.trim().toLowerCase());
+  }
+
+  /** Verified hosts, for reporting. */
+  verifiedHosts(): string[] {
+    return [...this.#verifiedHosts].sort();
   }
 
   /** Chromium launch options, including the proxy bypass list. */
@@ -190,7 +309,6 @@ export class PlaywrightAdapter {
 
   /** Abort requests to hosts outside the boundary, including redirects and subresources. */
   async #installNavigationGuard(context: BrowserContext): Promise<void> {
-    const allowed = permittedHosts(this.#config);
     await context.route('**/*', async (route) => {
       const requestUrl = route.request().url();
       if (requestUrl.startsWith('data:') || requestUrl.startsWith('blob:') || requestUrl.startsWith('about:')) {
@@ -204,7 +322,11 @@ export class PlaywrightAdapter {
         await route.abort('blockedbyclient');
         return;
       }
-      if (allowed.includes(host)) {
+      // Evaluated per request, not captured: a prototype verified during this call must be
+      // reachable by the very next request, without rebuilding the context. The probe allowance is
+      // checked separately and is a single host, so it cannot be confused with real trust.
+      const permitted = permittedHosts(this.#boundary()).includes(host) || host === this.#probeHost;
+      if (permitted) {
         await route.continue();
         return;
       }
@@ -372,8 +494,8 @@ export class PlaywrightAdapter {
               .catch(() => false),
           'Axure project document',
         ).then(wrapFrame),
-      navigate: async (url) => {
-        assertNavigable(config, url);
+      navigate: async (url, allowUnverifiedHost = false) => {
+        if (!allowUnverifiedHost) assertNavigable(this.#boundary(), url);
         try {
           const response = await page.goto(url, { waitUntil: 'load', timeout: config.navigationTimeoutMs });
           return { status: response?.status() ?? 0 };
@@ -388,6 +510,30 @@ export class PlaywrightAdapter {
             },
           );
         }
+      },
+      probeFrames: async <T,>(declaration: string): Promise<Array<T | null>> => {
+        const frames = page.frames();
+        // Same technique as `FrameHandle.run`, and for the same two reasons: the declaration arrives
+        // as *payload* rather than as an interpolated constant, and it is compiled inside the page
+        // with `new Function` so nothing from this module's scope is needed. Passing the declaration
+        // as a plain evaluation string does not work — a function declaration followed by a call
+        // parses as two statements and Chromium rejects it — which is what made every frame fail and
+        // no address verify.
+        return Promise.all(
+          frames.map((frame) =>
+            frame
+              .evaluate(
+                ({ code, factoryName }) => {
+                  const factory = new Function(`${code}; return ${factoryName};`)() as () => T;
+                  return factory();
+                },
+                { code: declaration, factoryName: INPAGE_FACTORY_NAME },
+              )
+              // A frame can be detached, cross-origin or mid-navigation. For a probe that is not an
+              // error, it is simply a frame that produced no evidence.
+              .catch(() => null),
+          ),
+        );
       },
       setViewportSize: async (size) => {
         await page.setViewportSize(size);

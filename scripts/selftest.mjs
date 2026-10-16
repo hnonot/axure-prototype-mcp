@@ -21,7 +21,20 @@ const root = resolve(here, '..');
 const OUT = resolve(root, 'selftest-out');
 mkdirSync(OUT, { recursive: true });
 
-const AXURE_URL = process.env.AXURE_URL || 'https://axure.example.com/ProjectB';
+/**
+ * The prototype under test.
+ *
+ * Required, with no fallback: a built-in address is exactly the bug 0.2.2 fixed, so this suite must
+ * not reintroduce one. `AXURE_URL` is what the server itself reads.
+ */
+const AXURE_URL = process.env.AXURE_URL?.trim();
+if (!AXURE_URL) {
+  console.error(
+    'AXURE_URL is required to run the end-to-end suite and has no default.\n' +
+      'Run it as: $env:AXURE_URL="http://host/Project"; npm run test:e2e',
+  );
+  process.exit(2);
+}
 const DEFAULT_PAGE = process.env.SELFTEST_PAGE || '';
 const results = [];
 
@@ -59,8 +72,9 @@ const transport = new StdioClientTransport({
   env: {
     ...process.env,
     AXURE_URL,
-    NO_PROXY: 'axure.example.com,localhost,127.0.0.1',
-    NO_PROXY_ALT: '',
+    // Derived from the address under test rather than hard-coded, so this suite carries no
+    // deployment of its own.
+    NO_PROXY: `${new URL(AXURE_URL).hostname},localhost,127.0.0.1`,
     AXURE_SETTLE_MS: process.env.AXURE_SETTLE_MS || '5000',
     AXURE_SCREENSHOT_DIR: OUT,
   },
@@ -80,10 +94,22 @@ check('MCP initialize handshake', true, `server=${client.getServerVersion()?.nam
 // --- tools/list -------------------------------------------------------------
 const { tools } = await client.listTools();
 const names = tools.map((tool) => tool.name);
-check('tools/list returns the 4 tools', names.length === 4, names.join(', '));
+check('tools/list returns the 5 tools', names.length === 5, names.join(', '));
+check(
+  'prototype selection is exposed as a tool',
+  names.includes('axure_use_prototype'),
+  names.filter((name) => name.includes('prototype')).join(', ') || 'missing',
+);
 for (const tool of tools) {
   const required = tool.inputSchema?.required ?? [];
-  check(`tool schema present: ${tool.name}`, !!tool.inputSchema && required.length === 0, `required=[${required.join(',')}]`);
+  // Every tool declares a schema, and exactly one has a required argument. The others default every
+  // argument; `axure_use_prototype` requires the address, because there is nothing sensible to guess
+  // and guessing would read the wrong prototype — the bug this release fixes.
+  const acceptable =
+    tool.name === 'axure_use_prototype'
+      ? required.length === 1 && required[0] === 'url'
+      : required.length === 0;
+  check(`tool schema present: ${tool.name}`, !!tool.inputSchema && acceptable, `required=[${required.join(',')}]`);
 }
 
 // --- axure_list_pages -------------------------------------------------------
@@ -531,6 +557,66 @@ check(
   (await call('axure_get_interactions', { page: dense.id, format: 'standard', maxWidgets: 300 }, 'call axure_get_interactions')).structuredContent?.document
     ?.schema === 'axure.page/v1',
   'one schema, reachable from both tools',
+);
+
+// --- runtime prototype selection ---------------------------------------------
+// These run LAST on purpose: a successful call changes which prototype is in effect for the rest of
+// the process, so a test placed after one would be reading a different project.
+//
+// The refusals are the important half. An address that is not Axure must be refused, and the check
+// must be positive evidence (the runtime was found) rather than a guess, because this is the one path
+// by which conversation text can widen which hosts the browser reaches.
+const refused = async (url, label, expectedCode) => {
+  const result = await call('axure_use_prototype', { url }, label);
+  const text = result.content?.find((block) => block.type === 'text')?.text ?? '';
+  return { isError: result.isError === true, code: result.structuredContent?.error?.code, text, expectedCode };
+};
+
+for (const [url, expectedCode, label] of [
+  ['file:///etc/passwd', 'NAVIGATION_BLOCKED', 'a local-file URL is refused'],
+  ['http://169.254.169.254/latest/meta-data/', 'NAVIGATION_BLOCKED', 'a cloud metadata address is refused'],
+  // Derived from the host under test, so this suite carries no deployment of its own.
+  [`${new URL(AXURE_URL).hostname.includes(':') ? `http://[${new URL(AXURE_URL).hostname}]` : `http://${new URL(AXURE_URL).hostname}`}:6379/`, 'NAVIGATION_BLOCKED', 'a service port is refused'],
+  [`https://user:secret@${new URL(AXURE_URL).host}/`, 'NAVIGATION_BLOCKED', 'credentials in the URL are refused'],
+  ['not-a-url', 'NAVIGATION_BLOCKED', 'a non-URL is refused'],
+]) {
+  const outcome = await refused(url, label, expectedCode);
+  check(label, outcome.isError && outcome.code === expectedCode, `code=${outcome.code ?? '(none)'}`);
+}
+
+check(
+  'an address that is not an Axure prototype is refused',
+  await (async () => {
+    // The prototype host serves other things too; its own origin is not a prototype page.
+    const origin = new URL(AXURE_URL).origin;
+    const outcome = await refused(origin, 'an address without the Axure runtime is refused', 'NOT_AXURE_PROJECT');
+    return outcome.isError && outcome.code === 'NOT_AXURE_PROJECT';
+  })(),
+  'NOT_AXURE_PROJECT, and nothing was admitted',
+);
+
+const adopted = await call(
+  'axure_use_prototype',
+  { url: AXURE_URL, maxPages: 5 },
+  'axure_use_prototype adopts a verified prototype',
+);
+const adoptedDoc = adopted.structuredContent ?? {};
+check(
+  'a verified prototype is adopted and reports the signals it was accepted on',
+  adopted.isError !== true &&
+    adoptedDoc.verifiedBy === 'axure-runtime-probe' &&
+    (adoptedDoc.signals ?? []).includes('axure-runtime'),
+  `signals: ${(adoptedDoc.signals ?? []).join(', ')} from ${adoptedDoc.frames} frame(s)`,
+);
+check(
+  'the adopted prototype is the one the other tools then read',
+  (await call('axure_list_pages', { filter: '订单管理' }, 'read pages after adopting')).structuredContent?.baseUrl === AXURE_URL,
+  `baseUrl=${(await call('axure_list_pages', {}, 'confirm base url')).structuredContent?.baseUrl}`,
+);
+check(
+  'the response carries a bounded page list so a caller need not ask twice',
+  (adoptedDoc.pages ?? []).length > 0 && (adoptedDoc.pages ?? []).length <= 5 && adoptedDoc.pageCount >= (adoptedDoc.pages ?? []).length,
+  `${(adoptedDoc.pages ?? []).length} of ${adoptedDoc.pageCount} page(s)`,
 );
 
 // --- error transparency ------------------------------------------------------

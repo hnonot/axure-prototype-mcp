@@ -1,10 +1,10 @@
 import { chromium } from 'playwright';
+import { DEFAULT_PAGE } from './_env.mjs';
 import { readFileSync } from 'node:fs';
-const URL_ = 'https://axure.example.com/ProjectB/%E7%89%88%E6%9C%AC%E6%9B%B4%E6%96%B0%E8%AE%B0%E5%BD%95.html';
 const browser = await chromium.launch({ headless: true });
 const ctx = await browser.newContext({ viewport: { width: 1440, height: 900 }, bypassCSP: true });
 const page = await ctx.newPage();
-await page.goto(URL_, { waitUntil: 'load', timeout: 60000 });
+await page.goto(DEFAULT_PAGE, { waitUntil: 'load', timeout: 60000 });
 await page.waitForTimeout(5000);
 
 const src = readFileSync('../../src/axure-page.ts', 'utf8');

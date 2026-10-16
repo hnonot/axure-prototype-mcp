@@ -28,6 +28,8 @@ import { INTERACTION_SOURCE, type RawInteractionCapture } from './axure/interact
 import { analyzeInteractions } from './axure/interaction-analyzer.js';
 import { summarize } from './axure/interaction.js';
 import { standardize } from './axure/standard.js';
+import { preflightPrototypeUrl, recognizePrototype, AXURE_URL_PROBE, type PrototypeProbeResult, type PrototypeRecognition } from './axure/prototype-url.js';
+import type { NavigationBoundary } from './security.js';
 import type {
   InteractionAnalysis,
 } from './axure/interaction-analyzer.js';
@@ -40,6 +42,8 @@ import type {
   PageOutput,
   SitemapResult,
   StandardDocument,
+  UsePrototypeRequest,
+  UsePrototypeResult,
   VisualRequest,
   VisualResult,
   WidgetGeometry,
@@ -80,13 +84,134 @@ export class AxureService {
     this.#log = log;
   }
 
-  /** The boundary used for navigation and page-reference resolution. */
-  #boundary() {
+  /**
+   * The boundary used for navigation and page-reference resolution.
+   *
+   * `baseUrl` follows the prototype currently in effect rather than always the configured one, and
+   * `verifiedHosts` carries the hosts admitted by `axure_use_prototype` so a page reference on the
+   * chosen prototype resolves.
+   */
+  #boundary(): NavigationBoundary & { defaultPageUrl: string } {
+    const boundary = this.#adapter.boundary();
+    const baseUrl = this.#adapter.activeBaseUrl() ?? this.#config.baseUrl;
     return {
-      baseUrl: this.#config.baseUrl,
-      allowedHosts: this.#config.allowedHosts,
-      defaultPageUrl: this.#config.defaultPageUrl,
+      ...boundary,
+      baseUrl,
+      defaultPageUrl: baseUrl ? `${baseUrl}/` : '',
     };
+  }
+
+  /**
+   * Verify a caller-supplied prototype address and adopt it.
+   *
+   * The address came from a conversation, so it is untrusted: it is checked syntactically first
+   * ({@link preflightPrototypeUrl}, before Chromium is involved) and then **positively identified**
+   * as an Axure prototype by looking for the Axure runtime in the real page. Only a positive
+   * identification admits the host, and only an admitted host can be read afterwards — which is what
+   * makes 「当访问的地址不具有 Axure 的特征…进行限制」 a property of the code rather than a promise.
+   */
+  async usePrototype(request: UsePrototypeRequest): Promise<UsePrototypeResult> {
+    const id = requestId();
+    const log = this.#log.child({ requestId: id, tool: 'use_prototype' });
+    const started = Date.now();
+
+    // Stage 1: syntactic, before any network access. Rejects `file:`, metadata endpoints, credential
+    // URLs and non-web ports, so an obvious SSRF payload never reaches Chromium.
+    const preflight = preflightPrototypeUrl(request.url);
+    if (!preflight.ok) {
+      throw new DomainError('NAVIGATION_BLOCKED', `the prototype address was refused: ${preflight.detail}`, {
+        hint: preflight.hint ?? 'Pass an http(s) URL that points at an Axure share or publish link.',
+      });
+    }
+    log.debug('address passed the pre-check', { origin: preflight.origin });
+
+    const alreadyConfigured = this.#adapter.isHostTrusted(preflight.host);
+    const warnings: string[] = [];
+    const session = await this.#adapter.openSession();
+    let recognition: PrototypeRecognition;
+    try {
+      // Stage 2: reach the host to find out whether it is Axure at all. The allowance is narrow —
+      // this one host, for this one attempt — and withdrawn in the `finally` below, so a host that
+      // fails identification does not stay reachable.
+      this.#adapter.beginProbe(preflight.host);
+      try {
+        await session.navigate(preflight.url, true);
+      } catch (error) {
+        throw new InfrastructureError('NAVIGATION_FAILED', `cannot open ${preflight.url}: ${messageOf(error)}`, {
+          retryable: true,
+          hint: 'Check that the address is reachable from this machine and that no proxy intercepts it.',
+          cause: error,
+        });
+      }
+
+      const settle = request.settleMs ?? this.#config.settleMs;
+      if (settle > 0) await session.wait(settle);
+
+      // Every frame is probed: an Axure share link keeps the runtime in the shell and the widgets in
+      // a content frame, and either one is enough to identify the host.
+      const probes = await session.probeFrames<PrototypeProbeResult>(AXURE_URL_PROBE);
+      recognition = recognizePrototype(probes.filter((probe): probe is PrototypeProbeResult => probe !== null));
+    } finally {
+      this.#adapter.endProbe();
+      await session.close();
+    }
+
+    if (!recognition.ok) {
+      log.warn('prototype identification failed', { host: preflight.host, signals: recognition.signals });
+      throw new DomainError(
+        'NOT_AXURE_PROJECT',
+        `${preflight.origin} does not look like an Axure prototype: ${recognition.detail}`,
+        {
+          hint:
+            'This server only reads Axure prototypes, and it checks rather than assumes. Confirm the address is an ' +
+            'Axure share/publish link (its page provides the $axure runtime) and that it loads without a login ' +
+            'wall, which would hide the runtime from the check.',
+        },
+      );
+    }
+
+    // Identification succeeded. Admit the host, then adopt it as the prototype in effect, so the
+    // ordinary tools read it without any further argument.
+    this.#adapter.trustVerifiedHost(preflight.host);
+    this.#adapter.adoptPrototype(preflight.url);
+    // The cached sitemap belongs to whichever prototype was active before; keeping it would answer a
+    // later call with the wrong project's pages.
+    this.#sitemapCache = null;
+
+    const result: UsePrototypeResult = {
+      url: preflight.url,
+      origin: preflight.origin,
+      host: preflight.host,
+      signals: recognition.signals,
+      frames: recognition.frames,
+      verifiedBy: 'axure-runtime-probe',
+      alreadyConfigured,
+      warnings,
+    };
+    if (recognition.title) result.title = neutralizeUntrusted(recognition.title).slice(0, 200);
+
+    // Reading the sitemap here is a convenience, not part of the check: a prototype whose shell is
+    // unusual is still usable by page URL, so a failure is reported as a warning rather than turning
+    // a successful identification into an error.
+    try {
+      const listing = await this.listPages({ refresh: true, filter: request.filter });
+      result.pageCount = listing.sitemap.pageCount;
+      result.pages = listing.sitemap.pages.slice(0, request.maxPages);
+      result.folders = collectFolders(listing.sitemap.pages);
+    } catch (error) {
+      warnings.push(
+        `the prototype was identified but its page list could not be read, so pass pages by URL: ${messageOf(error)}`,
+      );
+    }
+
+    log.debug('prototype adopted', {
+      host: preflight.host,
+      signals: recognition.signals,
+      pages: result.pageCount,
+      alreadyConfigured,
+      ms: Date.now() - started,
+    });
+    return result;
   }
 
   /** Read the project sitemap, cached for a few minutes. */
@@ -106,10 +231,10 @@ export class AxureService {
     } else {
       const session = await this.#adapter.openSession();
       try {
-        await this.#navigateOrThrow(session, this.#config.defaultPageUrl);
+        await this.#navigateOrThrow(session, this.#boundary().defaultPageUrl);
         await session.wait(this.#config.settleMs);
         const shell = await this.#frameOrThrow(session, 'shell');
-        sitemap = await readSitemap(shell, this.#config.baseUrl);
+        sitemap = await readSitemap(shell, this.#boundary().baseUrl);
         this.#sitemapCache = { value: sitemap, at: Date.now() };
         log.debug('sitemap cached', { pages: sitemap.pageCount });
       } finally {
@@ -849,6 +974,18 @@ function collectInteractionWidgetIds(interactions: InteractionFact[]): Set<strin
     }
   }
   return ids;
+}
+
+/**
+ * Distinct sitemap folders, so a caller learns the shape of a prototype without its whole page list.
+ */
+function collectFolders(pages: SitemapResult['pages']): string[] {
+  const folders = new Set<string>();
+  for (const page of pages) {
+    const path = page.path.join('/');
+    if (path) folders.add(path);
+  }
+  return [...folders].sort();
 }
 
 /** Drop widgets whose dynamic-panel state is not active. */

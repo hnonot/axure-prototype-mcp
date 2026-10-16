@@ -1,7 +1,7 @@
 import { writeFileSync, mkdirSync } from 'node:fs';
+import { BASE } from './_env.mjs';
 import vm from 'node:vm';
 
-const BASE = process.env.AXURE_URL || 'https://axure.example.com/ProjectB';
 mkdirSync('./recon-out', { recursive: true });
 
 const res = await fetch(`${BASE}/data/document.js`, { headers: { 'User-Agent': 'node' } });

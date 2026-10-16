@@ -1,4 +1,5 @@
 /**
+import { BASE } from './_env.mjs';
  * Recon probe: where does Axure keep interaction data in the live deployment?
  *
  * This answers the one genuinely unknown input of the interaction feature. It is read-only and
@@ -8,7 +9,7 @@
 import { chromium } from 'playwright';
 import { mkdirSync, writeFileSync } from 'node:fs';
 
-const PAGE = process.env.AXURE_PAGE || 'https://axure.example.com/ProjectB/%E8%AE%A2%E5%8D%95%E7%AE%A1%E7%90%86.html';
+const PAGE = process.env.AXURE_PAGE || `\/%E8%AE%A2%E5%8D%95%E7%AE%A1%E7%90%86.html`;
 const OUT = 'recon-out';
 mkdirSync(OUT, { recursive: true });
 

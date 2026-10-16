@@ -1,4 +1,5 @@
 /**
+import { BASE } from './_env.mjs';
  * Recon probe 9: verify the id bridge and measure real interaction coverage.
  *
  * Probe 8 found `model.objectPaths[hash].scriptId === 'u<N>'`. This confirms it is complete and
@@ -12,7 +13,7 @@ import { writeFileSync, mkdirSync } from 'node:fs';
 const PAGES = process.env.AXURE_PAGE
   ? [process.env.AXURE_PAGE]
   : [
-      'https://axure.example.com/ProjectB/%E8%AE%A2%E5%8D%95%E7%AE%A1%E7%90%86.html',
+      `${BASE}/%E8%AE%A2%E5%8D%95%E7%AE%A1%E7%90%86.html`,
     ];
 
 mkdirSync('recon-out', { recursive: true });

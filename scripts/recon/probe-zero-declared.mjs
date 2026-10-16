@@ -1,4 +1,5 @@
 /**
+import { BASE } from './_env.mjs';
  * Probe 11: isolate why the tool reports 0 declared interactions on `版本更新记录` while the
  * survey found 18 cases. Compares three things on the same page load:
  *
@@ -10,7 +11,7 @@
 import { chromium } from 'playwright';
 import { readFileSync } from 'node:fs';
 
-const PAGE = 'https://axure.example.com/ProjectB/%E7%89%88%E6%9C%AC%E6%9B%B4%E6%96%B0%E8%AE%B0%E5%BD%95.html';
+const PAGE = `${BASE}/%E7%89%88%E6%9C%AC%E6%9B%B4%E6%96%B0%E8%AE%B0%E5%BD%95.html`;
 
 // Use the same source the server compiles (read from TypeScript, as the reader test does).
 const src = readFileSync('src/axure/interaction-source.ts', 'utf8');

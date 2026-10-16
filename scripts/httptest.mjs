@@ -18,10 +18,22 @@ import { dirname, resolve } from 'node:path';
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const PORT = Number.parseInt(process.env.AXURE_TEST_PORT ?? '34117', 10);
 const TOKEN_PORT = PORT + 1;
+
+/** The prototype under test. Required: no built-in address, matching the server's own rule. */
+const AXURE_URL = process.env.AXURE_URL?.trim();
+if (!AXURE_URL) {
+  console.error(
+    'AXURE_URL is required to run the HTTP suite and has no default.\n' +
+      'Run it as: $env:AXURE_URL="http://host/Project"; npm run test:http',
+  );
+  process.exit(2);
+}
+
 const BASE_ENV = {
   ...process.env,
-  NO_PROXY: 'axure.example.com,localhost,127.0.0.1',
-  AXURE_URL: process.env.AXURE_URL || 'https://axure.example.com/ProjectB',
+  // Derived from the address under test, so this suite carries no deployment of its own.
+  NO_PROXY: `${new URL(AXURE_URL).hostname},localhost,127.0.0.1`,
+  AXURE_URL,
 };
 
 let failures = 0;
@@ -85,7 +97,7 @@ try {
   console.log('PASS  streamable-http handshake');
 
   const { tools } = await client.listTools();
-  check('tools/list over http', tools.length === 4, tools.map((t) => t.name).join(', '));
+  check('tools/list over http', tools.length === 5, tools.map((t) => t.name).join(', '));
 
   const pages = await client.callTool({ name: 'axure_list_pages', arguments: { filter: '版本' } });
   const count = pages.structuredContent?.pages?.length ?? 0;

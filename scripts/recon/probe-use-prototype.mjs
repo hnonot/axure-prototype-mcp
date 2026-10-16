@@ -1,0 +1,11 @@
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { BASE, NO_PROXY } from './_env.mjs';
+import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
+const t = new StdioClientTransport({ command: process.execPath, args: ["bin/axure-mcp.mjs"], env: { ...process.env, AXURE_URL: BASE, NO_PROXY: NO_PROXY }, stderr: "ignore" });
+const c = new Client({ name: "verify", version: "0" });
+await c.connect(t);
+const r = await c.callTool({ name: "axure_use_prototype", arguments: { url: BASE, maxPages: 5 } });
+const text = r.content?.find((b) => b.type === "text")?.text ?? "";
+console.log("isError:", r.isError === true);
+console.log(text.split("\n").slice(0, 8).join("\n"));
+await c.close();

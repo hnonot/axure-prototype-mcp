@@ -1,10 +1,10 @@
 import { chromium } from 'playwright';
+import { BASE , DEFAULT_PAGE } from './_env.mjs';
 import { readFileSync } from 'node:fs';
-const URL_ = process.env.AXURE_URL || 'https://axure.example.com/ProjectB';
 const browser = await chromium.launch({ headless: true });
 const ctx = await browser.newContext({ viewport: { width: 1440, height: 900 }, bypassCSP: true });
 const page = await ctx.newPage();
-await page.goto(URL_, { waitUntil: 'load', timeout: 60000 });
+await page.goto(DEFAULT_PAGE, { waitUntil: 'load', timeout: 60000 });
 await page.waitForTimeout(5000);
 
 // locate the content frame

@@ -1,4 +1,5 @@
 /**
+import { BASE } from './_env.mjs';
  * Recon probe 10: how much interaction data does this prototype actually contain?
  *
  * One page with six checkbox toggles is not enough evidence to characterise the feature. This
@@ -10,7 +11,6 @@
 import { chromium } from 'playwright';
 import { writeFileSync, mkdirSync } from 'node:fs';
 
-const BASE = 'https://axure.example.com/ProjectB';
 mkdirSync('recon-out', { recursive: true });
 
 /** A spread across functional areas, taken from the project sitemap. */

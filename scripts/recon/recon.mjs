@@ -1,7 +1,7 @@
 import { chromium } from 'playwright';
+import { DEFAULT_PAGE } from './_env.mjs';
 import { mkdirSync, writeFileSync } from 'node:fs';
 
-const URL_ = process.env.AXURE_URL || 'https://axure.example.com/ProjectB';
 const OUT = process.env.OUT || './recon-out';
 mkdirSync(OUT, { recursive: true });
 
@@ -16,7 +16,7 @@ page.on('console', (m) => console.log(`[console.${m.type()}]`, m.text().slice(0,
 page.on('pageerror', (e) => console.log('[pageerror]', String(e).slice(0, 300)));
 
 console.log('--- goto ---');
-const resp = await page.goto(URL_, { waitUntil: 'load', timeout: 60000 });
+const resp = await page.goto(DEFAULT_PAGE, { waitUntil: 'load', timeout: 60000 });
 console.log('status', resp && resp.status(), 'url', page.url());
 await page.waitForTimeout(4000);
 

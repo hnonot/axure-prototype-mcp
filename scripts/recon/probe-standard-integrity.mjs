@@ -1,6 +1,7 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { BASE, NO_PROXY } from './_env.mjs';
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
-const t = new StdioClientTransport({ command: process.execPath, args: ["bin/axure-mcp.mjs"], env: { ...process.env, AXURE_URL: "https://axure.example.com/ProjectB", NO_PROXY: "axure.example.com,localhost,127.0.0.1" }, stderr: "ignore" });
+const t = new StdioClientTransport({ command: process.execPath, args: ["bin/axure-mcp.mjs"], env: { ...process.env, AXURE_URL: BASE, NO_PROXY }, stderr: "ignore" });
 const c = new Client({ name: "verify", version: "0" });
 await c.connect(t);
 for (const maxNodes of [60, 300]) {

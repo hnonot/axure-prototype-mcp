@@ -1,11 +1,12 @@
 /**
+import { BASE } from './_env.mjs';
  * Probe 17: is the setPanelState panel hash present in `model.objectPaths`, and what are the real
  * `stateNumber` / authored-state relationships?
  */
 
 import { chromium } from 'playwright';
 
-const PAGE = 'https://axure.example.com/ProjectB/%E7%89%88%E6%9C%AC%E6%9B%B4%E6%96%B0%E8%AE%B0%E5%BD%95.html';
+const PAGE = `${BASE}/%E7%89%88%E6%9C%AC%E6%9B%B4%E6%96%B0%E8%AE%B0%E5%BD%95.html`;
 const PANEL_HASH = 'c6c3f95eb74849d4b0e7834911edea3b';
 
 const browser = await chromium.launch({ headless: true });

@@ -1,4 +1,5 @@
 import { loadConfig } from '../../dist/config.js';
+import { BASE } from './_env.mjs';
 import { BrowserPool } from '../../dist/browser.js';
 import { findContentFrame, extractPageView } from '../../dist/axure-page.js';
 
@@ -6,7 +7,7 @@ const config = loadConfig();
 const pool = new BrowserPool(config, (l, m, meta) => console.log(`[${l}] ${m}`, meta ?? ''));
 const session = await pool.openSession();
 const page = session.page;
-const url = 'https://axure.example.com/ProjectB/%E7%89%88%E6%9C%AC%E6%9B%B4%E6%96%B0%E8%AE%B0%E5%BD%95.html';
+const url = `${BASE}/%E7%89%88%E6%9C%AC%E6%9B%B4%E6%96%B0%E8%AE%B0%E5%BD%95.html`;
 try {
   await page.goto(url, { waitUntil: 'load', timeout: 60000 });
   await page.waitForTimeout(config.settleMs);

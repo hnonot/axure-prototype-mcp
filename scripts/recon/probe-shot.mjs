@@ -1,8 +1,8 @@
 import { chromium } from 'playwright';
+import { BASE , DEFAULT_PAGE } from './_env.mjs';
 import { writeFileSync } from 'node:fs';
 
-const URL_ = process.env.AXURE_URL || 'https://axure.example.com/ProjectB';
-const PAGE = 'https://axure.example.com/ProjectB/%E7%89%88%E6%9C%AC%E6%9B%B4%E6%96%B0%E8%AE%B0%E5%BD%95.html';
+const PAGE = `${BASE}/%E7%89%88%E6%9C%AC%E6%9B%B4%E6%96%B0%E8%AE%B0%E5%BD%95.html`;
 const pngSize = (b) => ({ width: b.readUInt32BE(16), height: b.readUInt32BE(20) });
 
 const browser = await chromium.launch({ headless: true });
@@ -18,7 +18,7 @@ const contentFrame = async (page) => {
   return null;
 };
 
-for (const target of [PAGE, URL_]) {
+for (const target of [PAGE, DEFAULT_PAGE]) {
   for (const vp of [{ width: 1440, height: 900 }, { width: 1920, height: 1200 }]) {
     const ctx = await browser.newContext({ viewport: vp, bypassCSP: true });
     const page = await ctx.newPage();

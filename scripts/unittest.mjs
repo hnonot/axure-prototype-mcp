@@ -66,7 +66,7 @@ test('loadConfig derives the base URL and defaults', () => {
 });
 
 test('splitAxureUrl separates origin and project path', () => {
-  assert.deepEqual(splitAxureUrl('https://axure.example.com/ProjectB'), { origin: 'http://axure.example.com', projectPath: '/ProjectB' });
+  assert.deepEqual(splitAxureUrl('https://axure.example.com/Project'), { origin: 'https://axure.example.com', projectPath: '/Project' });
   assert.deepEqual(splitAxureUrl('http://host/a/b/'), { origin: 'http://host', projectPath: '/a/b' });
 });
 
@@ -92,12 +92,41 @@ test('an out-of-range viewport is rejected instead of reaching Playwright', () =
   assert.throws(() => loadConfig({ AXURE_MAX_OUTLINE_NODES: '0' }), (error) => error.code === 'CONFIG_INVALID');
 });
 
+/** A valid address, so a test about some *other* setting does not trip the AXURE_URL check. */
+const OK_URL = { AXURE_URL: 'https://axure.example.com/Project' };
+
+test('a missing AXURE_URL is a configuration error, not a fallback', () => {
+  // The 0.2.2 bug: a built-in default silently served a different prototype. Absence of the
+  // variable must now be a hard, explained failure.
+  assert.throws(
+    () => loadConfig({}),
+    (error) => {
+      assert.match(error.message, /AXURE_URL: is required/);
+      assert.match(error.message, /no default/);
+      // The message must name the runtime alternative, or a caller has nowhere to go.
+      assert.match(error.message, /axure_use_prototype/);
+      return true;
+    },
+    'an empty environment must be refused',
+  );
+  // Whitespace is absence, not a value.
+  assert.throws(() => loadConfig({ AXURE_URL: '   ' }), /AXURE_URL: is required/);
+  // A valid one is accepted, so the check is not simply refusing everything.
+  assert.equal(loadConfig({ AXURE_URL: 'https://axure.example.com/Project' }).baseUrl, 'https://axure.example.com/Project');
+});
+
+test('a non-http scheme in AXURE_URL is refused', () => {
+  assert.throws(() => loadConfig({ AXURE_URL: 'file:///etc/passwd' }), /expected an http\(s\) URL/);
+});
+
 test('every invalid value is reported in one error', () => {
   try {
+    // No AXURE_URL on purpose: it is now one of the problems this test counts.
     loadConfig({ AXURE_VIEWPORT_WIDTH: 'x', AXURE_VIEWPORT_HEIGHT: 'y', AXURE_LOG_LEVEL: 'loud' });
     assert.fail('expected a ConfigError');
   } catch (error) {
-    assert.match(error.message, /3 problems/);
+    assert.match(error.message, /4 problems/);
+    assert.match(error.message, /AXURE_URL/);
     assert.match(error.message, /AXURE_VIEWPORT_WIDTH/);
     assert.match(error.message, /AXURE_VIEWPORT_HEIGHT/);
     assert.match(error.message, /AXURE_LOG_LEVEL/);
@@ -105,11 +134,11 @@ test('every invalid value is reported in one error', () => {
 });
 
 test('an unknown log level is rejected', () => {
-  assert.throws(() => loadConfig({ AXURE_LOG_LEVEL: 'verbose' }), (error) => error.code === 'CONFIG_INVALID');
+  assert.throws(() => loadConfig({ ...OK_URL, AXURE_LOG_LEVEL: 'verbose' }), (error) => error.code === 'CONFIG_INVALID');
 });
 
 test('noProxyList splits and trims', () => {
-  assert.deepEqual(noProxyList(loadConfig({ AXURE_NO_PROXY: ' a , b ,,c ' })), ['a', 'b', 'c']);
+  assert.deepEqual(noProxyList(loadConfig({ ...OK_URL, AXURE_NO_PROXY: ' a , b ,,c ' })), ['a', 'b', 'c']);
 });
 
 // --- HTTP transport safety (audit D7) ---------------------------------------

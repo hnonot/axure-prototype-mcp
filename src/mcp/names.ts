@@ -4,6 +4,7 @@ export const TOOL_NAMES = {
   pageMap: 'axure_get_page_map',
   visual: 'axure_get_visual',
   interactions: 'axure_get_interactions',
+  usePrototype: 'axure_use_prototype',
 } as const;
 
 /** Every tool name as an array, for assertions and documentation. */

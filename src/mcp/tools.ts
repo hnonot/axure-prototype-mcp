@@ -17,9 +17,15 @@ import type { AxureConfig } from '../config.js';
 import type { AxureService } from '../service.js';
 import type { Logger } from '../logger.js';
 import { TOOL_NAMES } from './names.js';
-import { errorContent, interactionContent, pageMapContent, sitemapContent, standardContent, visualContent } from './format.js';
+import { errorContent, interactionContent, pageMapContent, sitemapContent, standardContent, usePrototypeContent, visualContent } from './format.js';
 import { STANDARD_SCHEMA } from '../axure/standard.js';
-import type { InteractionRequest, PageMapRequest, StandardDocument, VisualRequest } from '../types.js';
+import type {
+  InteractionRequest,
+  PageMapRequest,
+  StandardDocument,
+  UsePrototypeRequest,
+  VisualRequest,
+} from '../types.js';
 
 export { TOOL_NAMES } from './names.js';
 
@@ -107,8 +113,77 @@ const settleMsSchema = z
  */
 const outputShape = z.looseObject({ ok: z.unknown().optional() });
 
-/** Register all three tools. */
+/** Register all tools. */
 export function registerTools(server: McpServer, context: ToolContext): void {
+  // ---------------------------------------------------------------------------
+  // axure_use_prototype
+  //
+  // Registered first because it is the one a caller needs when the address is not the configured
+  // one; the description is written so a model can tell when *not* to call it.
+  // ---------------------------------------------------------------------------
+  server.registerTool(
+    TOOL_NAMES.usePrototype,
+    {
+      title: 'Point the server at another Axure prototype',
+      description:
+        'Read a DIFFERENT Axure prototype than the one configured in AXURE_URL, without changing any configuration. ' +
+        'Call it when the user names a prototype address in the conversation (e.g. "use axure-reader on ' +
+        'http://example.com/..."), then call the other tools normally — they will read the prototype you named.\n\n' +
+        'Do NOT call this when the user names no address: the configured AXURE_URL already applies, and calling this ' +
+        'tool with a guessed address would read the wrong prototype.\n\n' +
+        'The address is treated as untrusted input. It must be an http(s) URL, and this tool VERIFIES that the host ' +
+        'actually serves an Axure prototype by looking for the Axure runtime in the real page before admitting it. ' +
+        'If it is not Axure the call fails and nothing is admitted. Cloud instance-metadata endpoints, embedded ' +
+        'credentials and non-web ports are refused outright.\n\n' +
+        'On success the prototype stays in effect for subsequent calls in this session. The response includes the ' +
+        'detected Axure signals, the page count and a bounded page list, so you can continue without another call.',
+      inputSchema: {
+        url: z
+          .string()
+          .max(2_048)
+          .describe(
+            'The Axure prototype share/publish URL the user named, including the scheme (e.g. "https://axure.example.com/MyProject"). ' +
+              'It is verified before use.',
+          ),
+        maxPages: z
+          .number()
+          .int()
+          .min(1)
+          .max(500)
+          .optional()
+          .describe('How many pages to include in the returned list (default 50). Use axure_list_pages for the rest.'),
+        filter: z
+          .string()
+          .max(256)
+          .optional()
+          .describe('Case-insensitive substring filter over page names and folder paths, applied to the returned list.'),
+        viewport: viewportSchema,
+        settleMs: settleMsSchema,
+      },
+      outputSchema: outputShape,
+      // Not read-only in the strict sense: it widens which hosts the browser may reach, so it is
+      // deliberately NOT marked readOnlyHint and IS openWorld (it contacts a caller-named host).
+      annotations: { readOnlyHint: false, idempotentHint: true, openWorldHint: true },
+    },
+    async (args) => {
+      const log = context.log.child({ tool: 'use_prototype' });
+      try {
+        const request: UsePrototypeRequest = {
+          url: args.url,
+          maxPages: args.maxPages ?? 50,
+          filter: args.filter,
+          viewport: args.viewport,
+          settleMs: args.settleMs,
+        };
+        const result = await context.service.usePrototype(request);
+        return usePrototypeContent(result, context.config.outlineCharBudget);
+      } catch (error) {
+        log.warn('use_prototype failed', { error: String(error) });
+        return errorContent(error);
+      }
+    },
+  );
+
   // ---------------------------------------------------------------------------
   // axure_list_pages
   // ---------------------------------------------------------------------------

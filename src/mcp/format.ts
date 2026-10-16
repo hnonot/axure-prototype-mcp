@@ -21,11 +21,18 @@
 
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import { AxureMcpError, ERROR_CODES, messageOf } from '../errors.js';
-import { neutralizeUntrusted } from '../security.js';
+import { neutralizeUntrusted, truncateWellFormed } from '../security.js';
 import { UNTRUSTED_NOTICE, renderPageMapWithin, renderSitemapResult, renderVisual } from '../axure/render.js';
 import { renderInteractions } from '../axure/interaction-render.js';
 import { renderStandardWithin } from '../axure/standard-render.js';
-import type { InteractionResult, PageMapResult, SitemapResult, StandardDocument, VisualResult } from '../types.js';
+import type {
+  InteractionResult,
+  PageMapResult,
+  SitemapResult,
+  StandardDocument,
+  UsePrototypeResult,
+  VisualResult,
+} from '../types.js';
 
 type TextBlock = { type: 'text'; text: string };
 type ImageBlock = { type: 'image'; data: string; mimeType: string };
@@ -215,6 +222,52 @@ export function interactionContent(result: InteractionResult, charBudget: number
 export function standardContent(document: StandardDocument, charBudget: number): CallToolResult {
   const text = renderStandardWithin(document, charBudget);
   return ok(text, { ok: true as const, schema: document.schema, document });
+}
+
+/**
+ * Format the result of adopting a caller-supplied prototype address.
+ *
+ * The Axure signals are reported verbatim because they are the evidence the address was accepted on:
+ * a caller that sees `axure-runtime:function` knows the check found the real runtime, rather than
+ * being told "verified" with nothing behind it.
+ */
+export function usePrototypeContent(result: UsePrototypeResult, charBudget: number): CallToolResult {
+  const lines: string[] = [UNTRUSTED_NOTICE, ''];
+  lines.push(`# prototype in effect: ${result.host}`);
+  lines.push(`url: ${result.url}`);
+  if (result.title) lines.push(`title: ${neutralizeUntrusted(result.title)}`);
+  lines.push(`verified by: ${result.verifiedBy}`);
+  lines.push(`signals: ${result.signals.join(', ') || '(none reported)'}`);
+  lines.push(`frames inspected: ${result.frames}`);
+  lines.push(
+    result.alreadyConfigured
+      ? 'note: this host was already reachable from AXURE_URL, so nothing new was admitted'
+      : 'note: this host was newly admitted for this session, after verification',
+  );
+  if (result.pageCount !== undefined) {
+    lines.push(`pages: ${result.pageCount}${result.folders?.length ? `, in ${result.folders.length} folder path(s)` : ''}`);
+  }
+  if (result.pages?.length) {
+    lines.push('', '## pages');
+    for (const page of result.pages) {
+      const folder = page.path.length ? `${page.path.join(' / ')} / ` : '';
+      lines.push(`  ${neutralizeUntrusted(page.id)}  ${folder}${neutralizeUntrusted(page.name)}`);
+    }
+    const hidden = (result.pageCount ?? 0) - result.pages.length;
+    if (hidden > 0) lines.push(`  … ${hidden} more page(s) not shown; call axure_list_pages for the rest`);
+  }
+  if (result.warnings.length) {
+    lines.push('', '## warnings');
+    for (const warning of result.warnings) lines.push(`  ${neutralizeUntrusted(warning)}`);
+  }
+  lines.push(
+    '',
+    'The other tools now read this prototype. Do not call this tool again unless the user names a different address.',
+  );
+
+  const text = lines.join('\n');
+  const bounded = text.length <= charBudget ? text : truncateWellFormed(text, charBudget);
+  return ok(bounded, { ok: true as const, ...result });
 }
 
 /**

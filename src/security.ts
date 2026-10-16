@@ -27,6 +27,14 @@ export interface NavigationBoundary {
   readonly baseUrl: string;
   /** Additional hosts explicitly permitted by the operator. */
   readonly allowedHosts: readonly string[];
+  /**
+   * Hosts admitted at runtime by **verification** rather than by configuration.
+   *
+   * Set when a caller supplies its own prototype address and that address was confirmed to serve a
+   * real Axure prototype. Kept separate from `allowedHosts` so the two trust bases stay
+   * distinguishable in logs and in reasoning: one is operator policy, the other is evidence.
+   */
+  readonly verifiedHosts?: readonly string[];
 }
 
 /** Parse `host` entries, tolerating a scheme and a port. */
@@ -54,6 +62,10 @@ export function permittedHosts(boundary: NavigationBoundary): string[] {
     }
   }
   for (const entry of boundary.allowedHosts) {
+    const host = normalizeHostEntry(entry);
+    if (host) hosts.push(host);
+  }
+  for (const entry of boundary.verifiedHosts ?? []) {
     const host = normalizeHostEntry(entry);
     if (host) hosts.push(host);
   }

@@ -1,4 +1,5 @@
 /**
+import { BASE } from './_env.mjs';
  * Probe 13: do masters carry their own `objectPaths`, and how do the 18 master interactions map to
  * DOM ids? The reader must walk `model.masters` too, and needs a hash→DOM-id map that covers master
  * widgets.
@@ -6,7 +7,7 @@
 
 import { chromium } from 'playwright';
 
-const PAGE = 'https://axure.example.com/ProjectB/%E7%89%88%E6%9C%AC%E6%9B%B4%E6%96%B0%E8%AE%B0%E5%BD%95.html';
+const PAGE = `${BASE}/%E7%89%88%E6%9C%AC%E6%9B%B4%E6%96%B0%E8%AE%B0%E5%BD%95.html`;
 
 const browser = await chromium.launch({ headless: true });
 const context = await browser.newContext({ viewport: { width: 1920, height: 1080 }, bypassCSP: true });

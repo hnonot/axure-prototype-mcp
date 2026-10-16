@@ -1,4 +1,5 @@
 import { loadConfig } from '../../dist/config.js';
+import { BASE } from './_env.mjs';
 import { BrowserPool, } from '../../dist/browser.js';
 import { readSitemap } from '../../dist/axure-doc.js';
 import { findContentFrame } from '../../dist/axure-page.js';

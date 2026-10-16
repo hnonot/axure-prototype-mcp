@@ -31,7 +31,7 @@ const test = (name, fn) => {
   }
 };
 
-const boundary = { baseUrl: 'https://axure.example.com/ProjectB', allowedHosts: [] };
+const boundary = { baseUrl: 'https://axure.example.com/Project', allowedHosts: [] };
 
 // --- navigation scope (audit A1) --------------------------------------------
 test('an external absolute URL is refused', () => {
@@ -57,13 +57,13 @@ test('a path that climbs out of the project is refused', () => {
 });
 
 test('legitimate page references still resolve', () => {
-  assert.equal(resolvePageReference(boundary, '订单管理.html'), 'https://axure.example.com/ProjectB/%E8%AE%A2%E5%8D%95%E7%AE%A1%E7%90%86.html');
-  assert.equal(resolvePageReference(boundary, '/订单管理.html'), 'https://axure.example.com/ProjectB/%E8%AE%A2%E5%8D%95%E7%AE%A1%E7%90%86.html');
-  assert.equal(resolvePageReference(boundary, 'https://axure.example.com/ProjectB/x.html'), 'https://axure.example.com/ProjectB/x.html');
+  assert.equal(resolvePageReference(boundary, '订单管理.html'), 'https://axure.example.com/Project/%E8%AE%A2%E5%8D%95%E7%AE%A1%E7%90%86.html');
+  assert.equal(resolvePageReference(boundary, '/订单管理.html'), 'https://axure.example.com/Project/%E8%AE%A2%E5%8D%95%E7%AE%A1%E7%90%86.html');
+  assert.equal(resolvePageReference(boundary, 'https://axure.example.com/Project/x.html'), 'https://axure.example.com/Project/x.html');
 });
 
 test('an explicitly allowed host is reachable', () => {
-  const relaxed = { baseUrl: 'https://axure.example.com/ProjectB', allowedHosts: ['cdn.example'] };
+  const relaxed = { baseUrl: 'https://axure.example.com/Project', allowedHosts: ['cdn.example'] };
   assert.equal(isNavigable(relaxed, 'http://cdn.example/lib.js'), true);
   assert.equal(isNavigable(relaxed, 'http://other.example/lib.js'), false);
   assert.deepEqual(permittedHosts(relaxed), ['axure.example.com', 'cdn.example']);

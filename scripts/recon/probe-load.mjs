@@ -1,9 +1,9 @@
 import { chromium } from 'playwright';
-const URL_ = process.env.AXURE_URL || 'https://axure.example.com/ProjectB';
+import { BASE , DEFAULT_PAGE } from './_env.mjs';
 const browser = await chromium.launch({ headless: true });
 const ctx = await browser.newContext({ viewport: { width: 1440, height: 900 } });
 const page = await ctx.newPage();
-await page.goto(URL_, { waitUntil: 'load', timeout: 60000 });
+await page.goto(DEFAULT_PAGE, { waitUntil: 'load', timeout: 60000 });
 for (const wait of [0, 500, 1000, 2000, 3000, 5000, 8000]) {
   if (wait) await page.waitForTimeout(wait - (wait === 500 ? 0 : 0));
   const state = await page.evaluate(() => {

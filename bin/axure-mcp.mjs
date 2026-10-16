@@ -11,6 +11,7 @@
 
 import { createRuntime, runStdio } from '../dist/server.js';
 import { loadConfig } from '../dist/config.js';
+import { loadProcessEnv } from '../dist/env-file.js';
 import { ConfigError, messageOf } from '../dist/errors.js';
 import { createLogger } from '../dist/logger.js';
 
@@ -38,7 +39,10 @@ if (flag('help') || flag('h')) {
       '                         address requires AXURE_HTTP_TOKEN.',
       '',
       'Environment:',
-      '  AXURE_URL                        Axure project share URL (default https://axure.example.com/ProjectB)',
+      '  AXURE_URL                        Axure project share URL. REQUIRED — there is no default,',
+      '                                   because a built-in address silently served the wrong',
+      '                                   prototype. Also settable in a .env file next to this project.',
+      '  AXURE_ENV_FILE                   explicit path to a .env file to read instead of searching',
       '  AXURE_ALLOWED_HOSTS              extra hosts the browser may visit, comma separated',
       '  AXURE_HEADLESS                   true|false (default true)',
       '  AXURE_VIEWPORT_WIDTH             default 1440',
@@ -51,6 +55,7 @@ if (flag('help') || flag('h')) {
       '  AXURE_SETTLE_MS                  extra wait after load, default 4000',
       '  AXURE_OUTLINE_CHAR_BUDGET        response text budget, default 48000',
       '  AXURE_MAX_OUTLINE_NODES          default 1200',
+      '  AXURE_MAX_INTERACTION_WIDGETS    cap on model widgets read for interactions, default 400',
       '  AXURE_MAX_WIDGET_IDS             default 40',
       '  AXURE_MAX_PAGES                  default 500',
       '  AXURE_BROWSER_IDLE_MS            close chromium after idle, default 300000',
@@ -70,9 +75,40 @@ function fail(message) {
   process.exit(2);
 }
 
+/**
+ * Load configuration, reading `.env` first.
+ *
+ * `.env` is loaded implicitly because that is what an operator expects when they edit it — the
+ * previous behaviour (never read it, and fall back to a built-in address) is exactly the bug this
+ * release fixes. A variable already present in the process environment always wins, so a host or
+ * container that sets `AXURE_URL` keeps control.
+ */
+function loadEnvironment() {
+  let merged;
+  try {
+    merged = loadProcessEnv(process.env);
+  } catch (error) {
+    // A malformed .env must not be silently ignored: that is the failure mode being fixed.
+    fail(`could not read the .env file: ${messageOf(error)}`);
+  }
+  for (const problem of merged.file.problems) {
+    process.stderr.write(`[axure-mcp] warning: .env ${problem}\n`);
+  }
+  if (merged.file.path) {
+    process.stderr.write(
+      `[axure-mcp] .env: ${merged.file.path}` +
+        (merged.file.overridden.length
+          ? ` (already set in the environment, so the file did not apply: ${merged.file.overridden.join(', ')})`
+          : '') +
+        '\n',
+    );
+  }
+  return merged.env;
+}
+
 let config;
 try {
-  config = loadConfig();
+  config = loadConfig(loadEnvironment());
 } catch (error) {
   fail(messageOf(error));
 }

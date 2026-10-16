@@ -798,6 +798,53 @@ export interface StandardStats {
 /** Whether `axure_get_page_map` returns the legacy outline or the standard document. */
 export type OutputFormat = 'outline' | 'standard';
 
+/* ========================================================================== */
+/* Runtime prototype selection                                                */
+/* ========================================================================== */
+
+/**
+ * Request to point the server at a prototype address supplied in the conversation.
+ *
+ * The address is untrusted input, so it is **verified** rather than trusted: see
+ * `src/axure/prototype-url.ts`. On success the host is admitted for the rest of the process, which
+ * is what lets a caller read pages from it with the ordinary tools without editing `.env`.
+ */
+export interface UsePrototypeRequest {
+  /** The prototype URL the caller named. Required: there is nothing to guess. */
+  url: string;
+  viewport?: { width: number; height: number };
+  settleMs?: number;
+  /** Bound on the returned page list, mirroring `axure_list_pages`. */
+  maxPages: number;
+  filter?: string;
+}
+
+/** Outcome of verifying and adopting a caller-supplied prototype address. */
+export interface UsePrototypeResult {
+  /** The verified address, normalized. */
+  url: string;
+  origin: string;
+  host: string;
+  /** Axure signals actually observed. Never empty on success. */
+  signals: string[];
+  /** Frames inspected while looking for the runtime. */
+  frames: number;
+  /** How the address was validated, so a reader can judge the strength of the check. */
+  verifiedBy: 'axure-runtime-probe';
+  /** Page title, when the prototype reports one. */
+  title?: string;
+  /** Whether `.env` already covered this host, in which case nothing new was admitted. */
+  alreadyConfigured: boolean;
+  /** Pages discovered, when the sitemap was readable. */
+  pageCount?: number;
+  /** A bounded prefix of the pages, so the caller can continue without a second call. */
+  pages?: SitemapPage[];
+  /** Folder paths seen, so the caller knows the shape without receiving every page. */
+  folders?: string[];
+  /** The sitemap could not be read; the prototype is still usable by page URL. */
+  warnings: string[];
+}
+
 /**
  * What `axure_get_page_map` returns.
  *

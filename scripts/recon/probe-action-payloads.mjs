@@ -1,4 +1,5 @@
 /**
+import { BASE } from './_env.mjs';
  * Probe 16: the full raw payload of a `linkWindow` (Open Link) and a `setPanelState` action, so the
  * decoder can extract link destinations and panel state numbers instead of dropping them.
  */
@@ -6,7 +7,7 @@
 import { chromium } from 'playwright';
 import { writeFileSync, mkdirSync } from 'node:fs';
 
-const PAGE = 'https://axure.example.com/ProjectB/%E7%89%88%E6%9C%AC%E6%9B%B4%E6%96%B0%E8%AE%B0%E5%BD%95.html';
+const PAGE = `${BASE}/%E7%89%88%E6%9C%AC%E6%9B%B4%E6%96%B0%E8%AE%B0%E5%BD%95.html`;
 mkdirSync('recon-out', { recursive: true });
 
 const browser = await chromium.launch({ headless: true });

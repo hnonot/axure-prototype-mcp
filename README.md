@@ -23,6 +23,7 @@ It has no dependency on any particular host, model or client library: one `npm i
     - [Where interaction data actually lives](#where-interaction-data-actually-lives)
     - [Relationship to MCP Resources and Prompts](#relationship-to-mcp-resources-and-prompts)
   - [Tools](#tools)
+    - [`axure_use_prototype`](#axure_use_prototype)
     - [`axure_list_pages`](#axure_list_pages)
     - [`axure_get_page_map`](#axure_get_page_map)
       - [The standard document (`axure.page/v1`)](#the-standard-document-axurepagev1)
@@ -45,21 +46,32 @@ It has no dependency on any particular host, model or client library: one `npm i
 
 ## Verification status
 
-All four tools are implemented and **verified against a live Axure deployment**
-(`https://axure.example.com/ProjectB`, Axure 10). The numbers below are from actual runs, and the interaction
-findings were cross-checked with an independent recon probe before the tool existed.
+All five tools are implemented and **verified against a live Axure deployment** (Axure 10, on two
+separate projects). The numbers below are from actual runs, and the interaction findings were
+cross-checked with an independent recon probe before that tool existed.
 
 | Suite | Command | Result |
 |---|---|---|
 | Build | `npm run build` | clean |
-| Unit | `npm test` | 30/30 |
+| Unit | `npm test` | 32/32 |
 | Security | `npm run test:security` | 14/14 |
+| Prototype address + `.env` | `npm run test:url` | 27/27 |
 | Browser boundary | `npm run test:inpage` | 6/6 |
 | Interaction logic + rendering | `npm run test:interaction` (first) | 35/35 |
 | In-page reader | `npm run test:interaction` (second) | 20/20 |
 | Standardization | `npm run test:standard` | 36/36 |
-| End-to-end (live prototype, real stdio) | `npm run test:e2e` | 52/52 |
+| End-to-end (live prototype, real stdio) | `npm run test:e2e` | 63/63 |
 | HTTP transport | `npm run test:http` | 8/8 |
+
+Runtime prototype selection, verified through the DSH GUI on two real projects:
+
+| Check | Observed |
+|---|---|
+| `.env` decides the address | `.env` with `AXURE_URL=https://axure.example.com/ProjectA` → `axure_list_pages` reported `base: https://axure.example.com/ProjectA`, 17 pages, 6 folders |
+| A named address is verified | `axure_use_prototype` on `https://axure.example.com/ProjectB` → `signals: axure-runtime, axure-runtime:function, axure-runtime:object, base-canvas, data-js, widget-canvas`, 3 frames, 279 pages, 93 folder paths |
+| The switch takes effect | the next `axure_list_pages` reported `base: https://axure.example.com/ProjectB` |
+| A non-Axure host is refused | `http://axure.example.com/` → `NOT_AXURE_PROJECT` (a real host, no Axure runtime) |
+| Unsafe addresses are refused | `file:///etc/passwd`, a metadata endpoint, port 6379, and a credential-bearing URL → `NAVIGATION_BLOCKED` |
 
 Measured on the reference prototype, `format="standard"` for 订单管理 (`w2yv7l`) at
 `maxNodes=300`, as asserted by `npm run test:e2e`:
@@ -214,7 +226,8 @@ reader merges them.
 
 ### Relationship to MCP Resources and Prompts
 
-Deliberately **not implemented**. The four tools already cover discovery → reading → seeing → interacting.
+Deliberately **not implemented**. The five tools already cover discovery → reading → seeing →
+interacting → choosing a prototype.
 Resources suit long-lived subscribable objects while a prototype page is an immediately-consumed
 snapshot, and Prompts target human-triggered workflows while this server's consumer is an agent.
 Adding either would enlarge the unverified surface for no capability gain. The decision is
@@ -224,8 +237,74 @@ revisited if a concrete need appears.
 
 ## Tools
 
-All four are read-only and idempotent, and every result opens with a notice that prototype-derived
-values are untrusted data.
+Five tools. Four are read-only and idempotent; `axure_use_prototype` is read-only against the
+prototype but widens which hosts the browser may reach, so it is declared as such. Every result opens
+with a notice that prototype-derived values are untrusted data.
+
+| Tool | Purpose |
+|---|---|
+| `axure_use_prototype` | Read a prototype named in the conversation, with no configuration change |
+| `axure_list_pages` | Discover pages (cheap) |
+| `axure_get_page_map` | Structure, geometry, annotations, and the `axure.page/v1` document |
+| `axure_get_visual` | The matching pixels |
+| `axure_get_interactions` | What responds to input, with evidence levels |
+
+### `axure_use_prototype`
+
+Points the server at a prototype the **user named in the conversation**, so reading another project
+needs no edit to `.env` and no restart. `AXURE_URL` stays the fallback: when the user names no
+address, this tool must not be called, and the configured prototype applies.
+
+```
+user: 使用 axure-reader，原型地址为 https://axure.example.com/ProjectB，分析订单管理页
+agent: axure_use_prototype { url: "https://axure.example.com/ProjectB" }   # verified, then adopted
+       axure_get_page_map    { page: "订单管理" }                  # reads the prototype just named
+```
+
+| Argument | Type | Meaning |
+|---|---|---|
+| `url` | string (**required**) | The prototype URL the user named, including the scheme |
+| `maxPages` | 1–500 | How many pages the response lists (default 50) |
+| `filter` | string (≤256) | Substring filter on the returned page list |
+| `viewport`, `settleMs` | | Rendering controls |
+
+`structuredContent`: `{ ok, url, origin, host, signals[], frames, verifiedBy, title?, alreadyConfigured, pageCount?, pages?, folders?, warnings[] }`
+
+#### The address is verified, not trusted
+
+The address is conversation text, so it is attacker-influenceable — an agent can be steered into
+passing a URL an adversary chose. A host allow-list is the wrong instrument, because the point is to
+reach a host that is not on it. So the address is admitted by **positive identification** instead:
+
+**Stage 1 — syntactic, before Chromium is involved** (`preflightPrototypeUrl`, pure and unit-tested).
+Refused outright:
+
+| Refused | Why |
+|---|---|
+| `file:`, `ftp:`, `data:`, `javascript:` | Only `http(s)` is a prototype; the rest turn this server into a local-file or script reader |
+| `169.254.169.254`, `169.254.170.2`, `100.100.100.200`, `metadata.google.internal` | Cloud instance-metadata endpoints. Nothing legitimate lives there, so they are refused unconditionally |
+| Ports 22, 23, 25, 110, 143, 445, 1433, 1521, 3306, 3389, 5432, 5900, 6379, 9200, 11211, 27017 | Well-known service ports that make an SSRF useful |
+| A URL with embedded credentials | The server does not forward credentials, and they would leak into logs |
+
+Private and internal ranges are deliberately **not** blocked: reading internal prototypes is this
+tool's entire purpose, and the reference deployment is itself an internal `10.x` host. Stage 2 is
+what carries the weight.
+
+**Stage 2 — in-page, across every frame** (`AXURE_URL_PROBE`). Admission requires the **Axure
+runtime** (`window.$axure`) to be found in some frame. Supporting signals — `#base`, `u<N>` widgets, a
+`data.js` script — are reported in `signals[]` so the caller can see the basis, but **cannot carry
+admission on their own**: a page with `#base` and `data.js` but no runtime is refused, and the test
+suite asserts exactly that. An Axure share link keeps the runtime in one frame and the widgets in
+another, which is why all frames are probed.
+
+While verification is in flight, the request guard allows **only that one host** and only for the
+attempt, withdrawn in a `finally` — so a host that fails identification does not stay reachable.
+On success the host is admitted, adopted as the prototype in effect, and the cached sitemap is
+cleared because it belonged to the previous project.
+
+**The refusal is a stated capability boundary, not a guarantee.** Positive identification limits what
+a hostile address can do; it does not make an address safe. A prototype behind a login wall fails
+verification because the runtime is hidden from the check — reported as such, with a hint.
 
 ### `axure_list_pages`
 
@@ -287,9 +366,6 @@ map's coordinates.
 | `scale` | 1–3 | **No effect**, kept for compatibility. See `AXURE_DEVICE_SCALE_FACTOR` |
 
 `structuredContent`: `{ ok, page, target, space, canvas, viewport, region?, widgets[], missingWidgets?, image{bytes,mimeType,attached}, savedTo?, warnings[] }`
-
-| `includeNotes` | boolean | Include designer annotations (default true) |
-| `format` | `outline` \| `standard` | Output shape. `outline` is the default and is described above; see [The standard document](#the-standard-document-axurepagev1) |
 
 #### The standard document (`axure.page/v1`)
 
@@ -486,10 +562,11 @@ npm install
 npx playwright install chromium     # once
 npm run build
 
-node bin/axure-mcp.mjs                          # stdio (default)
+cp .env.example .env                            # then set AXURE_URL in .env
+node bin/axure-mcp.mjs                          # stdio (default); reads .env automatically
 node bin/axure-mcp.mjs --http                   # Streamable HTTP on 127.0.0.1:3333
 node bin/axure-mcp.mjs --help                   # full option and env reference
-node --env-file=.env bin/axure-mcp.mjs          # load configuration from a file
+AXURE_URL=https://host/Project node bin/...     # or override per run; the env wins over .env
 ```
 
 An invalid configuration is reported **once, at startup**, listing every problem:
@@ -500,17 +577,55 @@ An invalid configuration is reported **once, at startup**, listing every problem
   - AXURE_VIEWPORT_WIDTH: 99999999 is outside the allowed range 320..4000
 ```
 
-`.env.example` lists every variable with its default. Nothing loads `.env` implicitly; pass
-`--env-file` or export the variables.
+`.env.example` is a **template and is not read**. Copy it to `.env`, which the server loads
+implicitly at startup (details below).
 
 ---
 
 ## Configuration
 
+**`AXURE_URL` is required and has no default.** That is deliberate: the built-in default used to be
+a concrete internal prototype, so an operator who set nothing — or who edited the wrong file — was
+silently served a *different* prototype with no error to explain it. The absence of the variable is
+now a startup failure that names the variable, states that there is no default, and points at
+`axure_use_prototype` as the per-conversation alternative.
+
+```
+[axure-mcp] error: invalid configuration (1 problem):
+  - AXURE_URL: is required and has no default. Set it to the Axure share/publish URL of the prototype
+    you want to read, e.g. AXURE_URL=https://axure.example.com/MyProject. To change prototypes per
+    conversation instead of editing configuration, call the axure_use_prototype tool.
+```
+
+### Where the address comes from
+
+Resolved in this order, so explicit action always wins:
+
+1. **the real process environment** — a shell export, a container variable, or a host-provided `env`
+   block. This outranks everything, so a deployment that pins the address keeps control.
+2. **`.env`** — read implicitly at startup. The server searches the working directory and up to seven
+   parents, or honours `AXURE_ENV_FILE` for an explicit path. A value the file sets that was already
+   present in the environment is reported on stderr, so the precedence is visible rather than
+   surprising.
+3. **otherwise it fails** — see above.
+
+Lines in `.env` that cannot be parsed are reported, never silently dropped: an ignored `AXURE_URL`
+line is precisely the failure this arrangement exists to prevent.
+
+```bash
+# .env — the file to edit. Never .env.example.
+AXURE_URL=https://axure.example.com/MyProject
+AXURE_NO_PROXY=localhost,127.0.0.1,::1
+```
+
+Editing `.env` requires a server restart (a stdio host restarts the child; DSH re-reads on bundle
+toggle). Editing `.env.example` has no effect at all, which was the reported bug.
+
 | Variable | Default | Meaning |
 |---|---|---|
-| `AXURE_URL` | `https://axure.example.com/ProjectB` | Project share URL; origin and project path are split from it |
-| `AXURE_ALLOWED_HOSTS` | *(empty)* | Extra hosts the browser may visit, comma separated |
+| `AXURE_URL` | **none — required** | Project share URL; origin and project path are split from it |
+| `AXURE_ENV_FILE` | *(search)* | Explicit `.env` path instead of searching upward |
+| `AXURE_ALLOWED_HOSTS` | *(empty)* | Extra hosts the browser may visit, comma separated. A runtime address does **not** need to be listed: it is verified instead |
 | `AXURE_HEADLESS` | `true` | Run Chromium headless |
 | `AXURE_VIEWPORT_WIDTH` / `_HEIGHT` | `1440` / `900` | Initial viewport (320–4000 / 240–4000) |
 | `AXURE_DEVICE_SCALE_FACTOR` | `1` | Device pixel ratio (1–3), fixed per browser context |
@@ -520,10 +635,11 @@ An invalid configuration is reported **once, at startup**, listing every problem
 | `AXURE_SETTLE_MS` | `4000` | Extra wait after `load`, for Axure's own bootstrapping |
 | `AXURE_OUTLINE_CHAR_BUDGET` | `48000` | Hard character budget for the response text |
 | `AXURE_MAX_OUTLINE_NODES` | `1200` | Default node cap |
+| `AXURE_MAX_INTERACTION_WIDGETS` | `400` | Cap on model widgets read when reading interactions |
 | `AXURE_MAX_WIDGET_IDS` | `40` | Maximum widget ids per call |
 | `AXURE_MAX_PAGES` | `500` | Maximum pages returned by one listing |
 | `AXURE_BROWSER_IDLE_MS` | `300000` | Close the pooled browser after this much idle time |
-| `AXURE_NO_PROXY` | internal hosts | Hosts that must bypass an ambient HTTP proxy |
+| `AXURE_NO_PROXY` | `localhost,127.0.0.1,::1` | Hosts that must bypass an ambient HTTP proxy |
 | `AXURE_SCREENSHOT_DIR` | `.axure-mcp/shots` | Base directory for `savePath` |
 | `AXURE_LOG_LEVEL` | `info` | `debug` / `info` / `warn` / `error`; always written to stderr |
 | `AXURE_HTTP_PORT` / `AXURE_HTTP_HOST` | `3333` / `127.0.0.1` | HTTP transport bind |
@@ -561,18 +677,25 @@ code and no private API, so the same binary keeps working with any other client.
         args: [E:/dsh-mcp/axure-mcp/bin/axure-mcp.mjs]
         cwd: E:/dsh-mcp/axure-mcp
         env:
-          AXURE_URL: https://axure.example.com/ProjectB
-          NO_PROXY: axure.example.com,localhost,127.0.0.1,::1
+          # No AXURE_URL here on purpose. An env block in this file overrides the server's own
+          # environment, so a hard-coded address here used to outrank the operator's `.env` — the
+          # address comes from the process environment or from `.env`.
+          NO_PROXY: localhost,127.0.0.1,::1
         toolCallTimeoutMs: 120000   # a cold call launches Chromium and loads a page
         failOnStartupError: true
 ```
+
+Add `AXURE_URL` to that `env` block only to pin a specific prototype for this profile, accepting
+that it will then outrank `.env`. The runtime alternative — `axure_use_prototype` — needs no
+configuration at all.
 
 ```
 plugin_manager action=install_bundle target=E:\dsh-mcp\axure-mcp-dsh-bundle
 ```
 
-Tools appear as `mcp__axure__axure_list_pages`, `mcp__axure__axure_get_page_map`,
-`mcp__axure__axure_get_visual` and `mcp__axure__axure_get_interactions`.
+Tools appear as `mcp__axure__axure_use_prototype`, `mcp__axure__axure_list_pages`,
+`mcp__axure__axure_get_page_map`, `mcp__axure__axure_get_visual` and
+`mcp__axure__axure_get_interactions`.
 
 > DSH keeps one stdio child alive and re-reads tool **schemas** from it, but keeps running the old
 > **code**. After changing server behaviour, toggle the bundle off and on again.
@@ -586,7 +709,7 @@ Tools appear as `mcp__axure__axure_list_pages`, `mcp__axure__axure_get_page_map`
       "command": "node",
       "args": ["E:/dsh-mcp/axure-mcp/bin/axure-mcp.mjs"],
       "cwd": "E:/dsh-mcp/axure-mcp",
-      "env": { "AXURE_URL": "https://axure.example.com/ProjectB", "NO_PROXY": "axure.example.com" }
+      "env": { "AXURE_URL": "https://axure.example.com/MyProject", "NO_PROXY": "localhost,127.0.0.1" }
     }
   }
 }
@@ -623,6 +746,20 @@ refuses:
 A request guard additionally aborts out-of-boundary hosts, including redirects and subresources. A
 caller-supplied `savePath` is confined to `AXURE_SCREENSHOT_DIR`; absolute paths and `..` are
 refused. The HTTP transport never binds a non-loopback address without a token.
+
+**1b. A runtime address is admitted by verification, not by trust.** `axure_use_prototype` widens
+the boundary, so it cannot use the allow-list above — the point is to reach a host that is not on it.
+Instead the address must pass a syntactic pre-check and then be *positively identified* as an Axure
+prototype, as described in its tool section. Two properties keep that from being a hole:
+
+- only a host that served an Axure runtime is admitted, and the host is admitted only after that
+  observation, so a caller cannot assert its way in;
+- while the verification request is in flight the guard allows **only that host**, withdrawn in a
+  `finally`, so a host that fails identification is not left reachable.
+
+This limits risk; it does not eliminate it. The check proves "this URL serves an Axure prototype",
+which is not the same as "this URL is safe to fetch". Private and internal ranges stay reachable on
+purpose, because reading internal prototypes is what this server is for.
 
 **2. Prototype content is labelled, and cannot forge structure.** Every result opens with the
 notice before any prototype text, and the server instructions on the protocol handshake repeat it.
@@ -663,17 +800,25 @@ The tools are designed so a weak client degrades rather than breaks.
 ## Tests
 
 ```bash
-npm test                  # 30 unit: config, security-independent domain, rendering, budgets
+npm test                  # 32 unit: config, .env precedence, domain, rendering, budgets
 npm run test:security     # 14 security: navigation scope, path confinement, escaping
 npm run test:interaction  # 35 interaction logic + 20 in-page reader = 55
 npm run test:standard     # 36 standardization: roles, provenance, hierarchy, dedup, bounding
+npm run test:url          # 27 address pre-check, Axure recognition, .env precedence
 npm run test:inpage       #  6 browser-boundary: in-page convention and isolation
-npm run test:e2e          # 52 end-to-end against the live deployment, over real stdio
+npm run test:e2e          # 63 end-to-end against the live deployment, over real stdio
 npm run test:http         #  8 HTTP transport, including the authentication gate
 npm run test:all          # everything
 ```
 
-Four of these are worth explaining, because they are what makes this feature testable.
+Five of these are worth explaining, because they are what makes this testable.
+
+`scripts/test-url.mjs` is the regression suite for the 0.2.2 bug. Three of its cases are the three
+independent causes: that `AXURE_URL` has no built-in default, that an empty environment is refused
+with a message naming the runtime alternative, and that `.env` is actually read — with the process
+environment outranking it, and with unparseable lines reported rather than dropped. The rest cover
+the admission policy, which is pure: the scheme and metadata and port refusals, and the rule that
+recognition requires the Axure runtime so `#base` and `data.js` alone cannot admit a host.
 
 `scripts/test-interaction.mjs` needs no browser. The evidence model, trigger and action
 normalization, branch decoding, aggregation and rendering all live in `src/axure/interaction.ts`,
@@ -708,6 +853,29 @@ They document *why* the implementation looks the way it does and are not part of
 
 ## Known limitations
 
+- **The Axure check proves what a host serves, not that fetching it is safe.** `axure_use_prototype`
+  refuses the classes of address that make an SSRF useful and requires the Axure runtime before
+  admitting a host, but a hostile address that really does serve an Axure prototype is still fetched.
+  The check limits the blast radius; it is not a guarantee.
+- **Private and internal ranges are reachable by design.** Rejecting RFC1918 addresses would reject
+  the deployment this tool exists to read. The pre-check blocks the link-local metadata endpoint, and
+  stage 2 requires the host to be Axure.
+- **A prototype behind a login wall cannot be verified.** The runtime is hidden from the check, so the
+  address is refused with that explanation rather than an empty page.
+- **The chosen prototype lasts for the process, not a conversation.** It is shared state, so a
+  second caller pointing elsewhere changes what the first one reads until someone points it back.
+  Cost-of-a-mistake is bounded: the address is verified, and the refusals are the ones listed above.
+- **Admission has no revoke path.** Once a host has been verified it stays reachable for the life of
+  the process; there is no tool that withdraws it, and the only way back is to restart the server or
+  adopt a different prototype. A misidentified host would therefore persist, which is another reason
+  the identification check is positive evidence rather than a heuristic.
+- **Concurrent verifications share one allowance slot.** The temporary allowance that lets a
+  verification fetch its own host is a single value on the adapter, so two simultaneous
+  `axure_use_prototype` calls can race over it. This is a code-reading observation and has not been
+  reproduced; both callers still face stage 2, so the worst case is a wasted probe, not an admission.
+- **Only same-origin frames can be probed.** A frame that is cross-origin or detached throws and is
+  treated as producing no evidence, which is correct but means an Axure runtime isolated inside such
+  a frame would not be seen.
 - **Static analysis only.** The server reads state; it does not click, type, hover or trigger Axure
   interactions. Widgets behind a click are reported as `clickable`, not activated.
 - **Interaction recognition is verified but narrow.** See the verification status above: only
@@ -777,10 +945,12 @@ Version-managed prompts, audits and change records live in [`.update/`](.update/
 
 | Version | Change |
 |---|---|
+| 0.2.2 | `AXURE_URL` required with no default, `.env` loaded implicitly with the process environment outranking it, the DSH bundle's hard-coded address removed, and `axure_use_prototype` for reading a prototype named in the conversation — [`.update/0.2.2`](.update/0.2.2/plan.md) |
 | 0.2.1 | Standardized output: the versioned `axure.page/v1` document with per-value provenance, an explicit hierarchy and relation graph, a deduplicated text index, and structure + interactions in one call — [`.update/0.2.1`](.update/0.2.1/plan.md) |
 | 0.2.0 | Interaction recognition: `axure_get_interactions`, the `declared`/`observed`/`inferred` evidence model — [`.update/0.2.0`](.update/0.2.0/plan.md) |
 | 0.1.0 | Initial release: three tools, canvas 1:1 fitting, region/widget scoping, stdio + HTTP, four-layer refactor |
 
-The version recorded here tracks the iteration directory, which is the authority. Earlier revisions
-of this table labelled the 0.2.0 iteration `0.3.0` while `package.json` moved ahead of it; both now
-read `0.2.1`.
+`package.json`, the server's reported version and this table all read `0.2.2`; the iteration
+directory is the authority when they disagree. An earlier revision of this table labelled the 0.2.0
+iteration `0.3.0` while `package.json` had moved ahead of it, which is why the two are now kept in
+step deliberately.

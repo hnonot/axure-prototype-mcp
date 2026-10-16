@@ -1,4 +1,5 @@
 /**
+import { BASE } from './_env.mjs';
  * Recon probe 3: capture the decoded current-page model through Axure's own loader.
  *
  * `files/<name>/data.js` is minified but passes **real property names** into
@@ -11,7 +12,7 @@
 import { chromium } from 'playwright';
 import { writeFileSync, mkdirSync } from 'node:fs';
 
-const PAGE = process.env.AXURE_PAGE || 'https://axure.example.com/ProjectB/%E8%AE%A2%E5%8D%95%E7%AE%A1%E7%90%86.html';
+const PAGE = process.env.AXURE_PAGE || `\/%E8%AE%A2%E5%8D%95%E7%AE%A1%E7%90%86.html`;
 mkdirSync('recon-out', { recursive: true });
 
 const browser = await chromium.launch({ headless: true });
