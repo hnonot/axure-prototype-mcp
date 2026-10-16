@@ -11,9 +11,22 @@
 
 import { createRuntime, runStdio } from '../dist/server.js';
 import { loadConfig } from '../dist/config.js';
-import { loadProcessEnv } from '../dist/env-file.js';
+import { loadProcessEnv, envSearchPath } from '../dist/env-file.js';
 import { ConfigError, messageOf } from '../dist/errors.js';
 import { createLogger } from '../dist/logger.js';
+import { dirname } from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+/**
+ * This script's own directory — `bin/` inside the checkout.
+ *
+ * Used as a second anchor for the `.env` search. A host chooses the working directory and this
+ * server does not get a say: VSCode's MCP client launches the process with the editor's folder,
+ * which is often the user's home, so a search anchored only on `process.cwd()` missed a `.env`
+ * sitting one level above this file. Since `AXURE_URL` is required, that turned a correct
+ * configuration into a startup failure and made the server unusable from that host.
+ */
+const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
 
 const argv = process.argv.slice(2);
 const flag = (name) => argv.includes(`--${name}`);
@@ -86,7 +99,7 @@ function fail(message) {
 function loadEnvironment() {
   let merged;
   try {
-    merged = loadProcessEnv(process.env);
+    merged = loadProcessEnv(process.env, { extraStarts: [SCRIPT_DIR] });
   } catch (error) {
     // A malformed .env must not be silently ignored: that is the failure mode being fixed.
     fail(`could not read the .env file: ${messageOf(error)}`);
@@ -110,7 +123,22 @@ let config;
 try {
   config = loadConfig(loadEnvironment());
 } catch (error) {
-  fail(messageOf(error));
+  // When the failure is the missing address, say where `.env` was looked for. A host that chose an
+  // unexpected working directory is the likeliest reason, and a bare "is required" leaves the
+  // operator guessing which file the server actually opened.
+  const message = messageOf(error);
+  if (/AXURE_URL: is required/.test(message)) {
+    const searched = envSearchPath(process.cwd(), [SCRIPT_DIR]);
+    fail(
+      `${message}\n\n` +
+        `Looked for a .env file at:\n  ${searched.join('\n  ')}\n` +
+        `Working directory: ${process.cwd()}\n` +
+        `Server directory:  ${SCRIPT_DIR}\n\n` +
+        'Create that first path with AXURE_URL=..., set AXURE_URL in the environment, or set ' +
+        'AXURE_ENV_FILE to an explicit path.',
+    );
+  }
+  fail(message);
 }
 
 const logger = createLogger(config.logLevel, { server: 'axure-prototype' });

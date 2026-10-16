@@ -15,7 +15,7 @@ import { mkdtempSync, writeFileSync, rmSync, mkdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { parseEnvFile, findEnvFile, loadProcessEnv } from '../dist/env-file.js';
+import { parseEnvFile, findEnvFile, loadProcessEnv, envSearchPath } from '../dist/env-file.js';
 import { preflightPrototypeUrl, recognizePrototype } from '../dist/axure/prototype-url.js';
 import { loadConfig, CONFIG_DEFAULTS } from '../dist/config.js';
 
@@ -90,6 +90,66 @@ test('.env is found by walking up from a subdirectory', () => {
     const nested = join(dir, 'a', 'b');
     mkdirSync(nested, { recursive: true });
     assert.equal(findEnvFile(undefined, nested), join(dir, '.env'));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('the checkout .env is found even when the working directory is unrelated', () => {
+  // Regression for a real report: VSCode's MCP client launches the server with the *editor's*
+  // folder as the working directory, so a search anchored only on `process.cwd()` did not find a
+  // `.env` sitting beside `bin/axure-mcp.mjs`. With `AXURE_URL` required that made the server fail
+  // to start from that host even though the configuration was perfectly correct.
+  const checkout = mkdtempSync(join(tmpdir(), 'axure-checkout-'));
+  const elsewhere = mkdtempSync(join(tmpdir(), 'axure-cwd-'));
+  try {
+    const bin = join(checkout, 'bin');
+    mkdirSync(bin, { recursive: true });
+    writeFileSync(join(checkout, '.env'), 'AXURE_URL=https://beside-the-script.example/Project\n');
+
+    // The point is that a search from `elsewhere` alone cannot see the checkout's file: whatever it
+    // finds (nothing, or an unrelated file further up) must not be the one beside the script.
+    assert.notEqual(findEnvFile(undefined, elsewhere), join(checkout, '.env'));
+
+    // With the script directory supplied, the checkout's `.env` is found.
+    assert.equal(findEnvFile(undefined, elsewhere, [bin]), join(checkout, '.env'));
+
+    const { env, file } = loadProcessEnv({}, { startDir: elsewhere, extraStarts: [bin] });
+    assert.equal(env.AXURE_URL, 'https://beside-the-script.example/Project');
+    assert.equal(file.path, join(checkout, '.env'));
+    assert.equal(loadConfig(env).baseUrl, 'https://beside-the-script.example/Project');
+  } finally {
+    rmSync(checkout, { recursive: true, force: true });
+    rmSync(elsewhere, { recursive: true, force: true });
+  }
+});
+
+test('the working directory still takes priority when it has the .env', () => {
+  // The extra anchor is a fallback, not an override: a project-local `.env` must keep winning.
+  const checkout = mkdtempSync(join(tmpdir(), 'axure-checkout-'));
+  const cwdDir = mkdtempSync(join(tmpdir(), 'axure-cwd-'));
+  try {
+    writeFileSync(join(checkout, '.env'), 'AXURE_URL=https://from-checkout.example/Project\n');
+    writeFileSync(join(cwdDir, '.env'), 'AXURE_URL=https://from-cwd.example/Project\n');
+    const { env, file } = loadProcessEnv({}, { startDir: cwdDir, extraStarts: [checkout] });
+    assert.equal(file.path, join(cwdDir, '.env'));
+    assert.equal(env.AXURE_URL, 'https://from-cwd.example/Project');
+  } finally {
+    rmSync(checkout, { recursive: true, force: true });
+    rmSync(cwdDir, { recursive: true, force: true });
+  }
+});
+
+test('the failure message can name every path that was searched', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'axure-env-'));
+  try {
+    const paths = envSearchPath(dir, [join(dir, 'bin')]);
+    assert.ok(paths.length > 0, 'at least one candidate path is reported');
+    assert.ok(paths.every((candidate) => candidate.endsWith('.env')));
+    // A missing address must be diagnosable without guesswork, so the paths are deduplicated and
+    // ordered from the working directory outward.
+    assert.equal(new Set(paths).size, paths.length, 'no duplicates');
+    assert.equal(paths[0], join(dir, '.env'));
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

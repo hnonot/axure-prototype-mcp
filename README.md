@@ -36,6 +36,7 @@ It has no dependency on any particular host, model or client library: one `npm i
   - [Connecting a host](#connecting-a-host)
     - [DSH](#dsh)
     - [Generic stdio client](#generic-stdio-client)
+    - [VSCode Copilot and other editor-hosted clients](#vscode-copilot-and-other-editor-hosted-clients)
     - [Streamable HTTP](#streamable-http)
   - [Trust and safety](#trust-and-safety)
   - [Model compatibility](#model-compatibility)
@@ -715,6 +716,62 @@ Tools appear as `mcp__axure__axure_use_prototype`, `mcp__axure__axure_list_pages
 }
 ```
 
+Setting `AXURE_URL` here is the most reliable arrangement, because it does not depend on the server
+finding a file. `cwd` is optional but useful: it is the first place the `.env` search looks.
+
+### VSCode Copilot and other editor-hosted clients
+
+An editor starts the MCP server itself and chooses the working directory, so the checkout's `.env`
+may not be the first thing found. Two arrangements both work:
+
+```jsonc
+// .vscode/mcp.json  (or the editor's equivalent)
+{
+  "servers": {
+    "axure": {
+      "type": "stdio",
+      "command": "node",
+      // Absolute path: the editor's working directory is not the checkout.
+      "args": ["E:/dsh-mcp/axure-mcp/bin/axure-mcp.mjs"],
+      "cwd": "E:/dsh-mcp/axure-mcp",
+      // Either set the address here, ...
+      "env": { "AXURE_URL": "https://axure.example.com/ProjectA" }
+    }
+  }
+}
+```
+
+1. **Set `AXURE_URL` in the client's `env` block** (shown above). Nothing has to be discovered, so
+   this is the arrangement least likely to surprise you.
+2. **Or omit `env` and rely on `.env`.** The server searches upward from the working directory and
+   *also* from its own directory, so `E:/dsh-mcp/axure-mcp/.env` is found even when the editor
+   launched the process from somewhere else. Add `cwd` if you want that file to win by proximity.
+
+If the server still reports that `AXURE_URL` is required, the message now lists every path it
+searched, plus the working directory and the server directory, so the answer is visible rather than
+guesswork:
+
+```
+[axure-mcp] error: invalid configuration (1 problem):
+  - AXURE_URL: is required and has no default. ...
+
+Looked for a .env file at:
+  C:\Users\you\.env
+  C:\Users\.env
+  C:\Users\admin\.env
+  E:\dsh-mcp\axure-mcp\.env          <- put AXURE_URL here
+  ...
+Working directory: C:\Users\admin
+Server directory:  E:\dsh-mcp\axure-mcp
+
+Create that first path with AXURE_URL=..., set AXURE_URL in the environment, or set AXURE_ENV_FILE
+to an explicit path.
+```
+
+Alternatively, call `axure_use_prototype` once the server is running — but note that a server which
+cannot start because `AXURE_URL` is missing never gets that far, which is why the `env`-block
+arrangement above is the recommended one for editor-hosted clients.
+
 ### Streamable HTTP
 
 ```bash
@@ -853,6 +910,12 @@ They document *why* the implementation looks the way it does and are not part of
 
 ## Known limitations
 
+- **`AXURE_URL` being required means a misconfigured host fails to start.** That is the intended
+  trade — the alternative was silently reading the wrong prototype — but it does mean an
+  editor-hosted client whose working directory is unrelated to the checkout must either set the
+  address in its own `env` block or leave the `.env` discoverable. The server searches upward from
+  the working directory *and* from its own directory; when it still cannot find one, it lists every
+  path it tried.
 - **The Axure check proves what a host serves, not that fetching it is safe.** `axure_use_prototype`
   refuses the classes of address that make an SSRF useful and requires the Axure runtime before
   admitting a host, but a hostile address that really does serve an Axure prototype is still fetched.

@@ -130,8 +130,25 @@ function findClosingQuote(value: string, quote: string): number {
   return -1;
 }
 
-/** Locate the `.env` file to read, or `undefined` when there is none. */
-export function findEnvFile(explicit: string | undefined, startDir: string): string | undefined {
+/**
+ * Locate the `.env` file to read, or `undefined` when there is none.
+ *
+ * @param explicit - an explicit path, honoured verbatim.
+ * @param startDir - the first place to look; normally the process working directory.
+ * @param extraStarts - further places to look, in order, when `startDir` yields nothing.
+ *
+ * `extraStarts` exists because a working directory is not something this server controls: VSCode's
+ * MCP client launches the process with the *editor's* folder as the working directory, which is
+ * often the user's home, so a search anchored only on `process.cwd()` missed a `.env` sitting right
+ * beside `bin/axure-mcp.mjs`. With `AXURE_URL` required that turned a correct configuration into a
+ * startup failure. The entry point therefore also passes its own directory, which is the project
+ * root wherever the checkout lives.
+ */
+export function findEnvFile(
+  explicit: string | undefined,
+  startDir: string,
+  extraStarts: readonly string[] = [],
+): string | undefined {
   if (explicit && explicit.trim()) {
     const target = isAbsolute(explicit) ? explicit : resolve(startDir, explicit);
     try {
@@ -141,22 +158,43 @@ export function findEnvFile(explicit: string | undefined, startDir: string): str
       return undefined;
     }
   }
-  // Walk upward, the way every other tool in this ecosystem does, so running from a subdirectory
-  // still picks up the project's `.env`.
-  let directory = resolve(startDir);
-  for (let depth = 0; depth < 8; depth += 1) {
-    const candidate = resolve(directory, '.env');
-    try {
-      readFileSync(candidate, 'utf8');
-      return candidate;
-    } catch {
-      /* keep walking */
+
+  // Walk upward from each starting point, the way every other tool in this ecosystem does, so
+  // running from a subdirectory — or a nested project layout — still picks up the nearest `.env`.
+  for (const start of [startDir, ...extraStarts]) {
+    if (!start) continue;
+    let directory = resolve(start);
+    for (let depth = 0; depth < 8; depth += 1) {
+      const candidate = resolve(directory, '.env');
+      try {
+        readFileSync(candidate, 'utf8');
+        return candidate;
+      } catch {
+        /* keep walking */
+      }
+      const parent = dirname(directory);
+      if (parent === directory) break;
+      directory = parent;
     }
-    const parent = dirname(directory);
-    if (parent === directory) break;
-    directory = parent;
   }
   return undefined;
+}
+
+/** Where a search looked, so a failure can say what it tried instead of only what it wanted. */
+export function envSearchPath(startDir: string, extraStarts: readonly string[] = []): string[] {
+  const seen: string[] = [];
+  for (const start of [startDir, ...extraStarts]) {
+    if (!start) continue;
+    let directory = resolve(start);
+    for (let depth = 0; depth < 8; depth += 1) {
+      const candidate = resolve(directory, '.env');
+      if (!seen.includes(candidate)) seen.push(candidate);
+      const parent = dirname(directory);
+      if (parent === directory) break;
+      directory = parent;
+    }
+  }
+  return seen;
 }
 
 /**
@@ -164,15 +202,19 @@ export function findEnvFile(explicit: string | undefined, startDir: string): str
  *
  * @param base - the environment to start from; defaults to `process.env`.
  * @param options.startDir - where to begin looking for `.env`; defaults to the current directory.
+ * @param options.extraStarts - further places to look when `startDir` yields nothing. The entry
+ *   point passes its own directory here, so the checkout's `.env` is found no matter what working
+ *   directory the host happened to launch the process with.
  * @param options.explicit - an explicit `.env` path, e.g. from `AXURE_ENV_FILE`.
  * @returns the merged environment plus what was read, so the caller can log it.
  */
 export function loadProcessEnv(
   base: EnvRecord = process.env,
-  options: { startDir?: string; explicit?: string } = {},
+  options: { startDir?: string; explicit?: string; extraStarts?: readonly string[] } = {},
 ): { env: EnvRecord; file: EnvFileResult } {
   const startDir = options.startDir ?? process.cwd();
-  const path = findEnvFile(options.explicit ?? base.AXURE_ENV_FILE, startDir);
+  const extraStarts = options.extraStarts ?? [];
+  const path = findEnvFile(options.explicit ?? base.AXURE_ENV_FILE, startDir, extraStarts);
   if (!path) return { env: { ...base }, file: { keys: [], overridden: [], problems: [] } };
 
   let text: string;
