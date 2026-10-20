@@ -1,26 +1,61 @@
 {
   "name": "axure-prototype-mcp",
-  "version": "0.2.2",
-  "private": true,
-  "type": "module",
+  "version": "0.2.3",
   "description": "Standalone MCP server exposing an Axure prototype as structural, spatial, visual and interaction context for any MCP host.",
   "license": "MIT",
-  "engines": {
-    "node": ">=20.11"
+  "type": "module",
+  "main": "./dist/server.js",
+  "types": "./dist/server.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/server.d.ts",
+      "default": "./dist/server.js"
+    },
+    "./config": {
+      "types": "./dist/config.d.ts",
+      "default": "./dist/config.js"
+    },
+    "./package.json": "./package.json"
   },
   "bin": {
-    "axure-prototype-mcp": "./bin/axure-mcp.mjs"
+    "axure-prototype-mcp": "bin/axure-mcp.mjs",
+    "axure-mcp": "bin/axure-mcp.mjs"
   },
-  "main": "./dist/server.js",
   "files": [
     "bin",
     "dist",
     "README.md",
-    "README.zh-CN.md"
+    "README.zh-CN.md",
+    ".env.example",
+    "CHANGELOG.md"
   ],
+  "engines": {
+    "node": ">=20.11"
+  },
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "axure",
+    "prototype",
+    "playwright",
+    "agent",
+    "ui-analysis",
+    "accessibility-tree"
+  ],
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.32.1",
+    "playwright": "^1.64.0",
+    "zod": "^4.6.7"
+  },
+  "devDependencies": {
+    "@types/node": "^24.19.2",
+    "typescript": "^5.9.3"
+  },
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "watch": "tsc -p tsconfig.json --watch",
+    "clean": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\"",
+    "prepublishOnly": "npm run clean && npm run build && npm test && npm run test:security && npm run test:url",
     "start": "node bin/axure-mcp.mjs",
     "http": "node bin/axure-mcp.mjs --http --port 3333",
     "test": "node scripts/unittest.mjs",
@@ -32,15 +67,11 @@
     "test:e2e": "node scripts/selftest.mjs",
     "test:http": "node scripts/httptest.mjs",
     "test:all": "npm test && npm run test:security && npm run test:url && npm run test:interaction && npm run test:standard && npm run test:inpage && npm run test:e2e && npm run test:http",
+    "verify:package": "node scripts/verify-package.mjs",
     "install-browser": "playwright install chromium"
   },
-  "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.32.1",
-    "playwright": "^1.64.0",
-    "zod": "^4.6.7"
-  },
-  "devDependencies": {
-    "@types/node": "^24.19.2",
-    "typescript": "^5.9.3"
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org/"
   }
 }
