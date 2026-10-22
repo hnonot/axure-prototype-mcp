@@ -1,1019 +1,250 @@
 # Axure Prototype MCP
 
-A standalone [Model Context Protocol](https://modelcontextprotocol.io) server that gives any
-MCP-compatible host **structural, spatial, visual and interaction** access to an Axure prototype
-published as a share link.
+A standalone [Model Context Protocol](https://modelcontextprotocol.io) server that turns a published Axure prototype into four kinds of context an agent can reason over: **structure, space, pixels and interaction**.
 
-```
-structure + space + visual + interaction, for the same page, in one call each:
+It depends on no particular host, model or client library. Start it with `npx` over **stdio** from Claude Desktop, VSCode, Cline, Cherry Studio or any other MCP client, or run it as a **Streamable HTTP** service.
 
-  axure_list_pages         -> what pages exist             (cheap discovery)
-  axure_get_page_map       -> what is where, plus text     (the workhorse; format=standard for the
-                                                           provenance-marked document)
-  axure_get_visual         -> the matching pixels          (coordinates stay aligned)
-  axure_get_interactions   -> what responds to input       (facts vs. guesses, labelled)
-```
-
-It has no dependency on any particular host, model or client library: one `npm install`, one
-`node bin/axure-mcp.mjs`, and it speaks standard MCP over **stdio** or **Streamable HTTP**.
-
-- [Axure Prototype MCP](#axure-prototype-mcp)
-  - [Architecture](#architecture)
-    - [Why the outline is parsed rather than derived from ARIA](#why-the-outline-is-parsed-rather-than-derived-from-aria)
-    - [Where interaction data actually lives](#where-interaction-data-actually-lives)
-    - [Relationship to MCP Resources and Prompts](#relationship-to-mcp-resources-and-prompts)
-  - [Tools](#tools)
-    - [`axure_use_prototype`](#axure_use_prototype)
-    - [`axure_list_pages`](#axure_list_pages)
-    - [`axure_get_page_map`](#axure_get_page_map)
-      - [The standard document (`axure.page/v1`)](#the-standard-document-axurepagev1)
-        - [Conversion rules](#conversion-rules)
-    - [`axure_get_visual`](#axure_get_visual)
-    - [`axure_get_interactions`](#axure_get_interactions)
-    - [Failures](#failures)
-  - [Install and run](#install-and-run)
-  - [Configuration](#configuration)
-  - [Connecting a host](#connecting-a-host)
-    - [DSH](#dsh)
-    - [Generic stdio client](#generic-stdio-client)
-    - [VSCode Copilot and other editor-hosted clients](#vscode-copilot-and-other-editor-hosted-clients)
-    - [Streamable HTTP](#streamable-http)
-  - [Trust and safety](#trust-and-safety)
-  - [Model compatibility](#model-compatibility)
-  - [Tests](#tests)
-  - [Known limitations](#known-limitations)
-  - [Next steps](#next-steps)
-  - [Version history](#version-history)
-
-## Verification status
-
-All five tools are implemented and **verified against a live Axure deployment** (Axure 10, on two
-separate projects). The numbers below are from actual runs, and the interaction findings were
-cross-checked with an independent recon probe before that tool existed.
-
-| Suite | Command | Result |
-|---|---|---|
-| Build | `npm run build` | clean |
-| Unit | `npm test` | 32/32 |
-| Security | `npm run test:security` | 14/14 |
-| Prototype address + `.env` | `npm run test:url` | 27/27 |
-| Browser boundary | `npm run test:inpage` | 6/6 |
-| Interaction logic + rendering | `npm run test:interaction` (first) | 35/35 |
-| In-page reader | `npm run test:interaction` (second) | 20/20 |
-| Standardization | `npm run test:standard` | 36/36 |
-| End-to-end (live prototype, real stdio) | `npm run test:e2e` | 63/63 |
-| HTTP transport | `npm run test:http` | 8/8 |
-
-Runtime prototype selection, verified through the DSH GUI on two real projects:
-
-| Check | Observed |
-|---|---|
-| `.env` decides the address | `.env` with `AXURE_URL=https://axure.example.com/ProjectA` → `axure_list_pages` reported `base: https://axure.example.com/ProjectA`, 17 pages, 6 folders |
-| A named address is verified | `axure_use_prototype` on `https://axure.example.com/ProjectB` → `signals: axure-runtime, axure-runtime:function, axure-runtime:object, base-canvas, data-js, widget-canvas`, 3 frames, 279 pages, 93 folder paths |
-| The switch takes effect | the next `axure_list_pages` reported `base: https://axure.example.com/ProjectB` |
-| A non-Axure host is refused | `http://axure.example.com/` → `NOT_AXURE_PROJECT` (a real host, no Axure runtime) |
-| Unsafe addresses are refused | `file:///etc/passwd`, a metadata endpoint, port 6379, and a credential-bearing URL → `NAVIGATION_BLOCKED` |
-
-Measured on the reference prototype, `format="standard"` for 订单管理 (`w2yv7l`) at
-`maxNodes=300`, as asserted by `npm run test:e2e`:
-
-| Metric | Value |
-|---|---|
-| Widgets the extractor saw | 1119 |
-| Elements in the document | 300 (131 roots, depth 3) |
-| Roles established from structural evidence | 300 of 300 |
-| Relations published | 223 (`contains` 169, `duplicates-text-of` 54) |
-| Interactions carried, from the same page load | 94 (6 declared, 88 inferred) |
-| Interaction records naming an omitted element | **0** |
-| Relations with a missing endpoint | **0** |
-| Text | 96 distinct of 150 occurrences |
-| Capture omissions reported | `empty-group`, `off-canvas`, `decorative-shape`, `node-budget` |
-
-The last two rows are invariants, not incidental counts, and the suite asserts them: because
-interaction-bearing elements are exempt from the node budget, a reader can always resolve a record
-to the element it is about.
-
-Exact relation and text counts vary slightly run to run (the outline is re-read from a live page),
-so treat them as representative; `elements`, `roots`, the role split and the interaction counts are
-stable.
-
-Measured interaction coverage on the reference prototype:
-
-| Page | Widgets | With interactions | Cases | Events | Actions |
-|---|---|---|---|---|---|
-| 订单管理 `w2yv7l` | 1119 | 6 | 12 | `onClick` | `setFunction` ×12 |
-| 版本更新记录 `6k5oyo` | 113 | 18 | 18 | `onClick` | `setPanelState` ×8, `linkWindow` ×10, `setFunction` ×10 |
-| 工单管理 `b8yrp4` | 833 | 6 | 12 | `onClick` | `setFunction` ×12 |
-
-**What is not verified** — stated plainly rather than implied:
-
-- **Only `onClick` was observed.** Hover, input, selection, keyboard and page-load triggers have
-  normalization rules but **no measured sample**, because every interaction in this prototype is a
-  click. Their handling is therefore untested.
-- **`linkWindow` destinations are unknown.** The measured payload's `target` carries only
-  `targetType: "page"` and no `pageId`, so a link action reports `Open Link` **without inventing a
-  destination**. This is a capability boundary, not a bug to paper over.
-- **`observed` is never produced.** This tool does not fire interactions (doing so changes page
-  state and is a separate risk), so that evidence level has a complete data structure and
-  constructor but no live sample.
-- **Other Axure versions are untested.** Every conclusion comes from this one Axure 10 deployment.
+- **Read-only.** It never clicks, types, submits or triggers a prototype interaction.
+- **Coordinates line up.** Geometry from `axure_get_page_map` and pixels from `axure_get_visual` come from the same render.
+- **Facts and guesses are separated.** Every interaction record states its own evidence level, and a source that could not be read is reported as a gap rather than as an empty list.
 
 ---
 
-## Architecture
+## Before you start
 
-Four layers with a one-way dependency graph. Nothing points back up, so a change in one layer
-cannot quietly become another layer's concern.
+1. **Node.js ≥ 20.11**
 
-```
-                 ┌──────────────────────────────────────────┐
-   host  ──────► │ mcp/         protocol + tool definitions  │  schemas, formatting
-                 └───────────────────┬──────────────────────┘
-                                     ▼
-                 ┌──────────────────────────────────────────┐
-                 │ service.ts   orchestration and policy     │  navigation, caching,
-                 └───────────────────┬──────────────────────┘  canvas fitting, budgets
-                                     ▼
-                 ┌──────────────────────────────────────────┐
-                 │ axure/       Axure domain logic           │  extraction, sitemap,
-                 └───────────────────┬──────────────────────┘  scoping, rendering
-                                     ▼
-                 ┌──────────────────────────────────────────┐
-                 │ playwright/  browser adapter              │  the only `playwright`
-                 └──────────────────────────────────────────┘  import
-        cross-cutting: config.ts · errors.ts · logger.ts · security.ts · types.ts
-```
+2. **Chromium**, driven by Playwright — install it once:
 
-| Path | Responsibility | Does **not** |
-|---|---|---|
-| `src/mcp/` | Tool schemas, result assembly, registration | touch the filesystem or the network |
-| `src/service.ts` | Turn a request into browser operations; own policy | know about MCP, models or clients |
-| `src/axure/` | Axure extraction, scoping, interaction analysis, rendering | import `playwright` — it takes a `FrameHandle` |
-| `src/playwright/` | Own Chromium, isolate sessions, enforce the boundary | know what an Axure page is |
-| `src/security.ts` | The one place deciding where the browser may go and what may be written | |
-| `src/config.ts` | Read and validate the environment, failing fast | contain feature logic |
+   ```bash
+   npx playwright install chromium
+   ```
 
-Inside `src/axure/`, the interaction and standardization features are split by **what can be
-verified without a browser**:
+   If a tool returns `BROWSER_UNAVAILABLE`, this step is usually what is missing.
 
-| File | Role | Tested by |
-|---|---|---|
-| `interaction.ts` | Pure reasoning: evidence levels, trigger/action normalization, aggregation | `test-interaction.mjs` (fixtures) |
-| `interaction-source.ts` | The in-page reader, as a plain JS string | `test-interaction-source.mjs` (compiles and runs it against a synthetic model) |
-| `interaction-analyzer.ts` | Decides each record's evidence level from its source | `test-interaction.mjs` |
-| `interaction-render.ts` | Text output, keeping facts and guesses in separate sections | `test-interaction.mjs` |
-| `standard.ts` | **The parsing layer**: raw captures → the `axure.page/v1` document. Pure, takes no `FrameHandle` and does no I/O | `test-standard.mjs` (fixtures) |
-| `standard-render.ts` | Bounded text rendering of a standard document | `test-standard.mjs` (via `test:e2e` for the live shape) |
+3. **A published Axure share link that loads without a login**
 
-`standard.ts` is the piece the 0.2.1 requirements call the 「解析层」, and its separation from the
-reading layer is what 「原始数据读取层与解析层应保持解耦」 asks for: it receives already-read data as
-arguments and returns a value, so every conversion rule — including the prohibition on inferring
-business meaning — is testable with no browser, no network and no prototype.
+   - Shaped like `https://axure.example.com/MyProject`, pointing at the **project root**.
+   - The page must load the `$axure` runtime. A login wall hides it and the address check fails with `NOT_AXURE_PROJECT`.
+   - This is the value of `AXURE_URL`, and what `axure_list_pages` reads the sitemap from.
 
-Two consequences are worth naming, because they are what the layering buys:
+4. **Network reachability.** The machine running the server must reach that address directly. If your shell exports a corporate proxy, add the prototype host to `AXURE_NO_PROXY`; otherwise Chromium goes through the proxy and times out.
 
-- **`src/axure/` never imports Playwright.** It receives a `FrameHandle`
-  (`run` / `title` / `bodyBox` / `ariaSnapshot`), so the domain is unit-testable with a fake
-  frame and does not break when Playwright changes.
-- **`src/mcp/` performs no I/O.** Every write and every navigation happens below it, which is why
-  the tool handlers are short enough to read at a glance.
+5. **The prototype address.** `AXURE_URL` is **required and has no default**. Set it in the host's `env` block, or in a `.env` file in the working directory (loaded implicitly at startup; the process environment wins over the file). To read a different prototype for one conversation, do not edit configuration — call `axure_use_prototype` instead.
 
-### Why the outline is parsed rather than derived from ARIA
-
-Measured against a real Axure 10 deployment before anything was written:
-
-**An Axure page's accessibility tree is close to useless.** Every widget surfaces as an anonymous
-`paragraph` or `img` — no role, no name, no nesting, no position. The whole page's ARIA snapshot is
-115 lines of `- paragraph: <text>` and `- img`.
-
-**The DOM and Axure's own runtime are rich.** Every widget is `<div id="u<number>">`, its kind is
-emitted as the HTML comment immediately before it (`<!-- 会员中心 (Dynamic Panel) -->`), and
-`window.$axure.getRectAndStyleById(id)` resolves authored geometry, fill, border, corner radius,
-opacity and text for **113 of 113** widgets on the reference page.
-
-So the outline is parsed from Axure's own markup and runtime. `includeAccessibility: true` still
-returns the ARIA snapshot, chiefly to *demonstrate* the point above rather than to extract from it.
-
-### Where interaction data actually lives
-
-Established by 16 probes against the live deployment, which refuted three initial assumptions:
-
-| Assumption | Measured reality |
-|---|---|
-| `$axure.document` is readable | `$axure` in the content frame is a **function** with no `.document`; `$axure.internal` exposes no keys |
-| A binding table is reachable on `$axure` | No usable path/id resolver exists |
-| DOM appearance is enough | It yields only guesses, and duplicates the model — so it is confined to the `inferred` channel |
-
-The working route: `files/<page>/data.js` is obfuscated, but it passes **real property names** into
-`$axure.loadCurrentPage(model)`. Hooking that call with `addInitScript` — before any page script runs
-— yields the fully decoded model:
-
-| What | Where |
-|---|---|
-| Page widget tree | `model.page.diagram.objects`, children under `objs` |
-| Masters | `model.masters.<hash>.diagram.objects`, children under `objs` **and** `diagrams[].objects` |
-| A widget | `{ id: <32-char hash>, label, friendlyType, interactionMap? }` |
-| Its interactions | `interactionMap[event].cases[].actions[]` |
-
-The page map addresses widgets as `u<N>` while the model keys them by hash, so two bridges are
-needed — and **neither alone is sufficient**:
-
-1. `model.objectPaths[hash].scriptId` — page-level widgets (measured **1119/1119** exact).
-2. A widget's own `scriptIds[0]` — master widgets, which have no `objectPaths` at all (measured
-   **18/18** exact).
-
-A page-level button that switches a panel *inside a master* needs both at once, which is why the
-reader merges them.
-
-### Relationship to MCP Resources and Prompts
-
-Deliberately **not implemented**. The five tools already cover discovery → reading → seeing →
-interacting → choosing a prototype.
-Resources suit long-lived subscribable objects while a prototype page is an immediately-consumed
-snapshot, and Prompts target human-triggered workflows while this server's consumer is an agent.
-Adding either would enlarge the unverified surface for no capability gain. The decision is
-revisited if a concrete need appears.
-
----
-
-## Tools
-
-Five tools. Four are read-only and idempotent; `axure_use_prototype` is read-only against the
-prototype but widens which hosts the browser may reach, so it is declared as such. Every result opens
-with a notice that prototype-derived values are untrusted data.
-
-| Tool | Purpose |
-|---|---|
-| `axure_use_prototype` | Read a prototype named in the conversation, with no configuration change |
-| `axure_list_pages` | Discover pages (cheap) |
-| `axure_get_page_map` | Structure, geometry, annotations, and the `axure.page/v1` document |
-| `axure_get_visual` | The matching pixels |
-| `axure_get_interactions` | What responds to input, with evidence levels |
-
-### `axure_use_prototype`
-
-Points the server at a prototype the **user named in the conversation**, so reading another project
-needs no edit to `.env` and no restart. `AXURE_URL` stays the fallback: when the user names no
-address, this tool must not be called, and the configured prototype applies.
-
-```
-user: 使用 axure-reader，原型地址为 https://axure.example.com/ProjectB，分析订单管理页
-agent: axure_use_prototype { url: "https://axure.example.com/ProjectB" }   # verified, then adopted
-       axure_get_page_map    { page: "订单管理" }                  # reads the prototype just named
-```
-
-| Argument | Type | Meaning |
-|---|---|---|
-| `url` | string (**required**) | The prototype URL the user named, including the scheme |
-| `maxPages` | 1–500 | How many pages the response lists (default 50) |
-| `filter` | string (≤256) | Substring filter on the returned page list |
-| `viewport`, `settleMs` | | Rendering controls |
-
-`structuredContent`: `{ ok, url, origin, host, signals[], frames, verifiedBy, title?, alreadyConfigured, pageCount?, pages?, folders?, warnings[] }`
-
-#### The address is verified, not trusted
-
-The address is conversation text, so it is attacker-influenceable — an agent can be steered into
-passing a URL an adversary chose. A host allow-list is the wrong instrument, because the point is to
-reach a host that is not on it. So the address is admitted by **positive identification** instead:
-
-**Stage 1 — syntactic, before Chromium is involved** (`preflightPrototypeUrl`, pure and unit-tested).
-Refused outright:
-
-| Refused | Why |
-|---|---|
-| `file:`, `ftp:`, `data:`, `javascript:` | Only `http(s)` is a prototype; the rest turn this server into a local-file or script reader |
-| `169.254.169.254`, `169.254.170.2`, `100.100.100.200`, `metadata.google.internal` | Cloud instance-metadata endpoints. Nothing legitimate lives there, so they are refused unconditionally |
-| Ports 22, 23, 25, 110, 143, 445, 1433, 1521, 3306, 3389, 5432, 5900, 6379, 9200, 11211, 27017 | Well-known service ports that make an SSRF useful |
-| A URL with embedded credentials | The server does not forward credentials, and they would leak into logs |
-
-Private and internal ranges are deliberately **not** blocked: reading internal prototypes is this
-tool's entire purpose, and the reference deployment is itself an internal `10.x` host. Stage 2 is
-what carries the weight.
-
-**Stage 2 — in-page, across every frame** (`AXURE_URL_PROBE`). Admission requires the **Axure
-runtime** (`window.$axure`) to be found in some frame. Supporting signals — `#base`, `u<N>` widgets, a
-`data.js` script — are reported in `signals[]` so the caller can see the basis, but **cannot carry
-admission on their own**: a page with `#base` and `data.js` but no runtime is refused, and the test
-suite asserts exactly that. An Axure share link keeps the runtime in one frame and the widgets in
-another, which is why all frames are probed.
-
-While verification is in flight, the request guard allows **only that one host** and only for the
-attempt, withdrawn in a `finally` — so a host that fails identification does not stay reachable.
-On success the host is admitted, adopted as the prototype in effect, and the cached sitemap is
-cleared because it belonged to the previous project.
-
-**The refusal is a stated capability boundary, not a guarantee.** Positive identification limits what
-a hostile address can do; it does not make an address safe. A prototype behind a login wall fails
-verification because the runtime is hidden from the check — reported as such, with a hint.
-
-### `axure_list_pages`
-
-Reads the project sitemap from Axure's own decoded document model (`$axure.document.sitemap`),
-cached for five minutes.
-
-| Argument | Type | Meaning |
-|---|---|---|
-| `refresh` | boolean | Ignore the cache and re-read the project |
-| `filter` | string (≤256) | Case-insensitive substring match on page name and folder path |
-
-`structuredContent`: `{ ok, projectName, baseUrl, generatedAt, pageCount, folderCount, filter?, truncated, pages[] }`
-
-### `axure_get_page_map`
-
-The workhorse: one page's structure **and** geometry **and** annotations in a single call.
-
-```
-u1 shape:Group @0,0 1920x1080
-  u2 shape:Rectangle @0,0 1920x1080 text="`"
-u4 dynamic-panel:Dynamic Panel @0,218 200x56 name="会员中心" states=2,active=0
-  u5 shape:Rectangle @0,218 200x56 clickable text="库存管理"
-u57 table:Table @222,95 1662x890
-  u58 group:Table Cell @222,95 133x33 image text="版本号"
-```
-
-| Argument | Type | Meaning |
-|---|---|---|
-| `page` | string (≤2048) | Page id, page name, project-relative path, or a URL inside the deployment |
-| `space` | `page` \| `viewport` | Canvas coordinates (default), or viewport-relative plus `onScreen` |
-| `detail` | `compact` \| `standard` \| `full` | `standard` (default) adds fill/stroke/radius/opacity; `full` adds typography |
-| `region` | `{x,y,width,height}` | Restrict to one rectangle **in the requested space** |
-| `widgetIds` | string[] (≤40, ≤128 each) | These widgets plus their ancestors and descendants |
-| `onScreenOnly` | boolean | Drop nodes outside the current viewport |
-| `maxNodes` | 20–5000 | Node cap, default `AXURE_MAX_OUTLINE_NODES` |
-| `includeHidden` | boolean | Keep widgets whose dynamic-panel state is inactive |
-| `includeAccessibility` | boolean | Append the ARIA snapshot, capped at a third of the response budget |
-| `includeNotes` | boolean | Designer annotations and page notes (default true) |
-| `format` | `outline` \| `standard` | See below. Default `outline` keeps the legacy shape |
-| `viewport`, `settleMs` | | Rendering controls |
-
-`structuredContent`: `{ ok, page{id,name,url,title,type,path}, space, pageSize, viewport, detail, stats, omitted, outline[], scope?, notes?, accessibility?, warnings[] }`
-
-### `axure_get_visual`
-
-Pixels **plus the geometry of exactly what was captured**, so the image always lines up with the
-map's coordinates.
-
-| Argument | Type | Meaning |
-|---|---|---|
-| `page` | string | As above |
-| `target` | `viewport` \| `full-page` \| `widgets` \| `none` | What to capture; `none` returns geometry only |
-| `widgetIds` | string[] | With `target: "widgets"`, crops to these widgets' union |
-| `includeImage` | boolean | Attach the PNG as an image block (default true) |
-| `savePath` | string (≤512) | Also write the PNG inside `AXURE_SCREENSHOT_DIR` |
-| `pad` | 0–200 | Padding around a widget crop |
-| `space` | `page` \| `viewport` | Space of the returned geometry |
-| `viewport`, `settleMs` | | Rendering controls |
-| `scale` | 1–3 | **No effect**, kept for compatibility. See `AXURE_DEVICE_SCALE_FACTOR` |
-
-`structuredContent`: `{ ok, page, target, space, canvas, viewport, region?, widgets[], missingWidgets?, image{bytes,mimeType,attached}, savedTo?, warnings[] }`
-
-#### The standard document (`axure.page/v1`)
-
-`format="standard"` returns a **versioned, model-agnostic document** instead of the flat outline.
-It answers a question the outline cannot: *for each value, is this something the prototype states,
-something this server computed, or something nobody determined?* It also returns structure and
-interactions together, from one page load, so a consumer does not have to join two shapes by hand.
-
-```jsonc
-{
-  "schema": "axure.page/v1",              // the field to branch on
-  "page":     { "id": "w2yv7l", "name": "订单管理", "url": "...", "title": "...",
-                "authoredType": "Wireframe", "path": ["MES系统", "生产计划"] },
-  "capture":  { "space": "page", "detail": "standard",
-                "canvas":   { "width": 1920, "height": 1080 },
-                "viewport": { "width": 1440, "height": 900, "scrollX": 0, "scrollY": 0 },
-                "at": "2026-05-14T09:12:33.001Z" },
-  "elements": [ /* top-level elements; children are reachable through childIds */ ],
-  "elementsById": { "u575": { /* the same elements, keyed by raw id */ } },
-  "relations": [ { "id": "rel1:contains:u1->u2", "kind": "contains",
-                   "from": "u1", "to": "u2",
-                   "provenance": "derived", "rule": "structure/containment" } ],
-  "text": { "entries": [ { "text": "库存管理", "elementIds": ["u5", "u7"],
-                           "occurrences": 2, "from": "widget-text" } ],
-            "totalOccurrences": 150, "distinctTexts": 96, "droppedEmpty": 0 },
-  "interactions": { "items": [ /* the same records axure_get_interactions returns */ ],
-                    "gaps": [], "stats": { /* … */ }, "warnings": [] },
-  "stats": { "widgets": 1119, "elements": 300, "roots": 131, "maxDepth": 3,
-             "rolesKnown": 300, "rolesUnknown": 0,
-             "byRole": { "shape": 245, "input": 36, "image": 13, "container": 5,
-                         "repeating-container": 1 },
-             "relations": 223,
-             "interactions": { "total": 94, "declared": 6, "observed": 0, "inferred": 88 } },
-  "omitted": { "empty-group": 58, "off-canvas": 257, "decorative-shape": 12, "node-budget": 148 },
-  "gaps": [], "warnings": []
-}
-```
-
-Counts are from a real run; relation and text totals move slightly between runs because the page is
-re-read live.
-
-An element, with the provenance marks that are the point of the shape:
-
-```jsonc
-{
-  "id": "u1363",                       // raw prototype id, always preserved
-  "ref": "w2yv7l#u1363",               // stable handle for follow-up calls
-  "parentId": "u12", "childIds": ["u1364"], "depth": 2,
-  "authoredType": "Checkbox",           // the prototype's own token, verbatim
-  "role": { "value": "input",           // derived…  (or { "provenance": "unknown",
-            "provenance": "derived",    //            "reason": "unrecognized-value",
-            "rule": "classify/role-from-authored-type(checkbox)" },  // "detail": "…" })
-  "geometry": { "x": 539, "y": 375, "width": 12, "height": 16,
-                "onScreen": true, "visible": true,
-                "provenance": "derived", "rule": "capture/geometry" },
-  "text": "库存管理",
-  "interactionRefs": ["w2yv7l#u1363"]
-}
-```
-
-| Field | Meaning |
-|---|---|
-| `schema` | Constant `axure.page/v1`. Branch on this, not on field presence |
-| `elements` | **Top-level** elements only. The tree is `childIds`; walk it, do not read `elements` as a flat list |
-| `elementsById` | Every element at any depth, keyed by raw id. Interaction-bearing elements and their ancestors are exempt from `maxNodes`, so every entry in `interactions.items` resolves here — the e2e suite asserts that. A relation endpoint always resolves too |
-| `authoredType` | The prototype's own widget type token, never normalized |
-| `role` | A discriminated union. Either `{ value, provenance, rule }`, or `{ provenance: 'unknown', reason, detail }` |
-| `geometry` | Always `derived` — the capture measured and normalized it |
-| `relations[].kind` | `contains`, `targets`, `switches-state-of`, `duplicates-text-of` |
-| `relations[].provenance` | `fact` when it comes from the project model, `derived` when this server worked it out |
-| `relations[].evidence` | For interaction-derived relations, the record's `declared`/`observed`/`inferred` level |
-| `text.entries[].occurrences` | How many carriers were collapsed into one entry. `elementIds` lists them |
-| `text.droppedEmpty` | Whitespace-only runs that were discarded — counted, never silently lost |
-| `omitted` | Nodes dropped by scoping/budgeting, by reason |
-| `gaps` | Sources that could not be read, and what a consumer therefore cannot see |
-| `stats.rolesUnknown` | How many elements have no determinable role. Equal to the `unknown` count in `byRole` |
-
-**`structuredContent.document` carries the whole document; only the text rendering is budgeted.**
-That split is deliberate: bounding the prose must never lose the data.
-
-#### Conversion rules
-
-The raw read is turned into the document above by `src/axure/standard.ts`, a pure function. Every
-rule is listed here with its id, because that id appears in the output as `role.rule`,
-`geometry.rule` or `relations[].rule` — so a derived value always names how it was derived.
-
-| Rule id | Input | Output | Notes |
-|---|---|---|---|
-| `capture/geometry` | the extractor's measured rect, already normalized | `geometry.{x,y,width,height,onScreen,visible}` | Always `derived`: the capture measured and rounded it |
-| `capture/depth` | DOM nesting from the extractor | `depth`, `parentId`, `childIds` | The hierarchy is rebuilt as explicit links rather than left implicit in nesting |
-| `classify/role-from-authored-type(...)` | the prototype's own `friendlyType` token | `role.value` | A fixed structural table: `Rectangle → shape`, `Dynamic Panel → state-container`, `Table → repeating-container`, `Text Field → input`, … |
-| `classify/role-from-structure(...)` | the extractor's bucket, or a non-empty image URL | `role.value` | Used only when the type token is unrecognized, and trusted only where it cannot mislead: `group → container`, `input → input`, `image → image` |
-| — (no rule applies) | nothing structural matched | `role = { provenance: 'unknown', reason, detail }` | `not-authored` when the prototype named no type; `unrecognized-value` when it named one this server does not cover |
-| `structure/containment` | parent/child links | a `contains` relation per edge | One edge per child, so `contains = elements − roots` |
-| `interaction/target` | `action.targets[].widgetId` | a `targets` relation | Only when the target exists in this document; an unresolvable target stays visible in the interaction record instead of becoming a fabricated node |
-| `interaction/panel-target` | `action.panelId`, already resolved by the reader | a `switches-state-of` relation | `provenance: fact` when the interaction is `declared`, `derived` otherwise |
-| `text/dedup` | identical text runs | one `text.entries` bucket plus a `duplicates-text-of` relation | The collapse is reported, never silent |
-
-Normalization is lossless where it matters: `authoredType` keeps the prototype's token verbatim
-even when `role` is `unknown`; whitespace-only text is dropped **and counted** in
-`text.droppedEmpty`; and text clipped by a budget records its untruncated length in
-`textTruncated.length`.
-
-### `axure_get_interactions`
-
-Reports which widgets respond to input, and what each one does. Triggers and actions are read
-from the project model, never guessed from appearance.
-
-| Argument | Type | Meaning |
-|---|---|---|
-| `page` | string | As above |
-| `includeInferred` | boolean | Include `inferred` guesses (default true) |
-| `maxWidgets` | 1–2000 | Cap on model entries read (default 400) |
-| `format` | `interactions` \| `standard` | `interactions` is the default and is described below; `standard` returns the same `axure.page/v1` document `axure_get_page_map` produces |
-| `viewport` | object | Rendering control |
-
-`structuredContent`: `{ ok, page, stats, interactions[], gaps[], warnings[] }`
-
-#### The evidence model
-
-Every record states how much is actually known about it. This is the point of the tool: the
-iteration requires that a guess is never presented as a confirmed result, so the level travels
-**with the data** and a consumer can filter on it mechanically.
-
-| `confidence` | Meaning | Has actions? |
-|---|---|---|
-| `declared` | The project model states this interaction. A fact. | Yes, with conditions and branches |
-| `observed` | The interaction was triggered and this is what changed. A fact, but covering only the one branch that ran. | Yes, for that branch only |
-| `inferred` | The widget merely looks interactive (pointer cursor, form element, focusable, ARIA role). A **guess**. | **No** — never |
-
-`inferred` records cannot carry actions by construction: the constructor that builds them has no
-parameter that accepts an action list, so no later edit can attach one by forgetting the rule.
-Each `inferred` record states its basis in `inferredReason`.
-
-If a source could not be read, the result says so in `gaps` rather than returning a bare empty
-list. `declared: 0` **with** a gap means "could not read"; `declared: 0` with **no** gap means
-"the model is readable and declares nothing". The response text states which of the two applies,
-because conflating them would be exactly the fabrication this feature is designed to avoid.
-
-```
-stats: 12 of 113 widgets have interaction information; 9 declared, 0 observed, 3 inferred; 14 branches
-actions: set-panel-state=4 navigate=2 show=3 hide=1 wait=1
-
-## declared interactions (facts from the project model)
-  p1#u5 <click> "库存管理"
-    Case 1 if [[This.text]] equals "x" -> set panel state(widget u4 state=1) ; wait(300ms)
-
-## inferred interactivity (guesses — no actions known)
-  p1#u47 <click> — CSS cursor is pointer, which suggests it is meant to be clicked
-```
-
-#### What this tool does not do
-
-It **does not click, type or otherwise fire an interaction**. Doing so changes page state, which
-is a different capability with a different risk profile, and it is not enabled. `observed` records
-are therefore normally absent; the level exists so that adding trigger-driven capture later is an
-additive change rather than a schema break.
-
-### Failures
-
-A failure returns `isError: true` with the **same stable code** in the text and in
-`structuredContent.error`:
-
-```
-error: WIDGET_NOT_FOUND
-message: none of the requested widgets exist on this page: u999999
-hint: Call axure_get_page_map for this page first and use the ids from its outline.
-retryable: false
-```
-
-| Code | Meaning | Class |
-|---|---|---|
-| `CONFIG_INVALID` | The environment is invalid; the server refuses to start | operator |
-| `BROWSER_UNAVAILABLE` | Chromium or a context could not be created | infrastructure |
-| `NAVIGATION_FAILED` | The page could not be loaded | infrastructure |
-| `NAVIGATION_BLOCKED` | A host outside the deployment was refused by policy | domain |
-| `PAGE_NOT_FOUND` | The page reference is not a page of this prototype | domain |
-| `NOT_AXURE_PROJECT` | The URL loaded but exposes no Axure document | domain |
-| `NO_CONTENT_FRAME` | The page loaded but contains no Axure widget frame | infrastructure |
-| `RENDER_FAILED` | The in-page extraction failed | infrastructure |
-| `OPERATION_TIMEOUT` | An in-page operation exceeded `AXURE_OPERATION_TIMEOUT_MS` | infrastructure |
-| `WIDGET_NOT_FOUND` | A named widget does not exist on this page | domain |
-| `SCREENSHOT_FAILED` | The capture itself failed | infrastructure |
-| `WRITE_FAILED` | `savePath` was refused, or the write failed | domain / infrastructure |
-| `INVALID_ARGUMENT` | The arguments are internally inconsistent | domain |
-| `INTERNAL` | An unexpected condition | — |
+> Everything derived from the prototype — page names, widget names, widget text, designer notes, pixels — is controlled by whoever published it. Treat it as **data to analyse**, never as instructions to follow.
 
 ---
 
 ## Install and run
 
 ```bash
-npm install
-npx playwright install chromium     # once
-npm run build
+# stdio (the host spawns it; most common)
+npx -y axure-prototype-mcp@latest
 
-cp .env.example .env                            # then set AXURE_URL in .env
-node bin/axure-mcp.mjs                          # stdio (default); reads .env automatically
-node bin/axure-mcp.mjs --http                   # Streamable HTTP on 127.0.0.1:3333
-node bin/axure-mcp.mjs --help                   # full option and env reference
-AXURE_URL=https://host/Project node bin/...     # or override per run; the env wins over .env
+# shorter alias
+npx -y axure-mcp@latest
+
+# Streamable HTTP, default http://127.0.0.1:3333/mcp
+npx -y axure-prototype-mcp@latest --http
+
+# a non-loopback bind requires a token
+AXURE_HTTP_TOKEN=<at-least-16-chars> npx -y axure-prototype-mcp@latest --http --host 0.0.0.0
+
+# full flag and environment reference
+npx -y axure-prototype-mcp@latest --help
 ```
 
-An invalid configuration is reported **once, at startup**, listing every problem:
+Windows PowerShell:
 
-```
-[axure-mcp] error: invalid configuration (2 problems):
-  - AXURE_URL: not a valid absolute URL: "http://"
-  - AXURE_VIEWPORT_WIDTH: 99999999 is outside the allowed range 320..4000
+```powershell
+$env:AXURE_URL = "https://axure.example.com/MyProject"
+npx -y axure-prototype-mcp@latest
 ```
 
-`.env.example` is a **template and is not read**. Copy it to `.env`, which the server loads
-implicitly at startup (details below).
+Invalid configuration is reported once at startup, with every problem listed, and the process exits non-zero instead of running half-configured.
+
+---
+
+## Connect a host
+
+Generic stdio configuration:
+
+```json
+{
+  "mcpServers": {
+    "axure": {
+      "command": "npx",
+      "args": ["-y", "axure-prototype-mcp@latest"],
+      "env": {
+        "AXURE_URL": "https://axure.example.com/MyProject",
+        "NO_PROXY": "localhost,127.0.0.1,::1"
+      }
+    }
+  }
+}
+```
+
+- On Windows, if the client cannot spawn `npx` directly, use `"command": "cmd"` with `"args": ["/c", "npx", "-y", "axure-prototype-mcp@latest"]`.
+- The first start fetches the package and the browser, so a cold call is slow; allow a tool timeout of at least 120 seconds.
+- HTTP mode: POST to `http://<host>:3333/mcp` with `Authorization: Bearer <AXURE_HTTP_TOKEN>`. `GET /health` needs no token.
+
+---
+
+## Tools
+
+Typical flow: `axure_list_pages` for page ids, `axure_get_page_map` for structure and text, `axure_get_visual` when pixels matter, `axure_get_interactions` when behaviour matters.
+
+| Tool | Use |
+|---|---|
+| `axure_list_pages` | List pages (cheap discovery) |
+| `axure_get_page_map` | Structure, geometry, text and notes for one page (the workhorse) |
+| `axure_get_visual` | Screenshot: full canvas, viewport, or selected widgets |
+| `axure_get_interactions` | Which widgets respond to input, and what each one does |
+| `axure_use_prototype` | Switch to another prototype address named in the conversation |
+
+No tool modifies prototype state, and repeated calls return the same result; `axure_use_prototype` only adds one verified host to the set the browser may reach. Each call returns `structuredContent` for machine consumers plus a text rendering of the same payload for text-only models.
+
+### `axure_list_pages`
+
+| Parameter | Description |
+|---|---|
+| `refresh` | Bypass the 5-minute cache and re-read the project |
+| `filter` | Case-insensitive substring filter over page names and folder paths |
+
+Returns `{ ok, projectName, baseUrl, pageCount, folderCount, pages[{ id, name, url, path, type }], truncated }`. A `pages[].id` can be passed straight to the `page` argument of the other tools.
+
+### `axure_get_page_map`
+
+| Parameter | Default | Description |
+|---|---|---|
+| `page` | project entry page | Page id, exact page name, project-relative path, or a URL inside the deployment |
+| `space` | `page` | `page` = absolute canvas pixels; `viewport` = relative to the visible area, plus `onScreen` |
+| `detail` | `standard` | `compact` = id/type/geometry/text; `standard` adds fill, stroke, radius, opacity; `full` adds typography and padding |
+| `format` | `outline` | `standard` returns the `axure.page/v1` document described below |
+| `maxNodes` | 1200 | Node limit (20–5000) |
+| `region` | — | Keep only nodes intersecting this rectangle, in the same space |
+| `widgetIds` | — | Keep only these widgets, their ancestors and their descendants (≤40) |
+| `onScreenOnly` | `false` | Drop nodes outside the current viewport |
+| `includeHidden` | `false` | Keep widgets whose dynamic-panel state is not active |
+| `includeNotes` | `true` | Include designer annotations |
+| `includeAccessibility` | `false` | Append the raw ARIA snapshot (Axure widgets expose almost no ARIA semantics; useful only for comparison) |
+| `viewport` | 1440×900 | Render viewport |
+
+`format: "standard"` returns the `axure.page/v1` document: explicit parent/child and relation graph (`contains`, `targets`, `switches-state-of`, `duplicates-text-of`), per-value provenance (`fact` / `derived` / `unknown`), a deduplicated text index, and the page's interactions — all from a single page load. Prefer it when another agent will reason over the result.
+
+Element roles are derived from structural evidence only (the prototype's own widget type, form tags, image assets). They are never inferred from a name or a label; when the evidence is absent the role is `unknown` and states why.
+
+### `axure_get_visual`
+
+| Parameter | Default | Description |
+|---|---|---|
+| `page` | entry page | As above |
+| `target` | `viewport` | `viewport` / `full-page` (whole canvas) / `widgets` (crop to widgets) / `none` (geometry only) |
+| `widgetIds` | — | Required for `target: "widgets"`; the crop covers their union |
+| `includeImage` | `true` | Attach the PNG as an image block; set `false` for text-only models or tight context |
+| `savePath` | — | Also write the PNG inside `AXURE_SCREENSHOT_DIR` (relative only; absolute paths and `..` are refused) |
+| `pad` | `0` | Padding around a widget crop, in pixels (0–200) |
+| `space` | `page` | Coordinate space for reported geometry |
+
+The viewport is enlarged to the canvas size so the canvas renders at 1:1; when that happens, `warnings` says so. A PNG above 8 MiB is not attached as an image block — capture a widget crop instead.
+
+### `axure_get_interactions`
+
+| Parameter | Default | Description |
+|---|---|---|
+| `page` | entry page | As above |
+| `includeInferred` | `true` | Include `inferred` guesses; `false` gives a facts-only view |
+| `maxWidgets` | 400 | Cap on model entries read (1–2000) |
+| `format` | `interactions` | `standard` returns the same `axure.page/v1` document as `axure_get_page_map` |
+
+Every record carries a `confidence`, which is the point of the tool:
+
+| Level | Meaning | Carries actions |
+|---|---|---|
+| `declared` | The project model states the interaction. **Fact** | Yes, with conditions and branches |
+| `observed` | The interaction ran and this is what changed. **Fact**, but only about the branch that ran | Yes, that branch only |
+| `inferred` | The widget merely looks interactive (pointer cursor, form element, focusable, ARIA role). **Guess** | Never |
+
+This build does not trigger interactions, so `observed` normally does not appear. If a source could not be read, `gaps` says so — an empty `declared` list **with** a gap means "could not read", while an empty list **without** a gap means the page genuinely declares none.
+
+### `axure_use_prototype`
+
+| Parameter | Description |
+|---|---|
+| `url` | The prototype address from the conversation, including the scheme |
+| `maxPages` | How many pages to return in the list (default 50) |
+| `filter` | Name filter over the returned list |
+
+Reads a prototype other than `AXURE_URL` without editing configuration. The address is treated as untrusted: it is pre-checked syntactically (non-http(s) schemes, cloud metadata endpoints, embedded credentials and service ports are refused), then the real page must prove it serves the `$axure` runtime. Only a verified host is admitted. On success the prototype stays in effect for the session, and the returned page list can be used immediately.
+
+### When output is truncated
+
+A large page is not returned in full; the omission is **reported**: `stats`, `omitted` (counts by reason) and `warnings` state how much was dropped and why. Narrow the request with `region`, `widgetIds` or a smaller `maxNodes`. The response text also has a hard `AXURE_OUTLINE_CHAR_BUDGET` ceiling; exceeding it truncates depth-first and reports how many nodes were cut.
+
+---
+
+## Common errors
+
+Failures come back as `isError: true`, with the same stable code in the first text line and in `structuredContent.error`:
+
+```text
+error: WIDGET_NOT_FOUND
+message: none of the requested widgets exist on this page: u999999
+hint: Call axure_get_page_map for this page first and use the ids from its outline.
+retryable: false
+```
+
+| Code | Usual cause | Fix |
+|---|---|---|
+| `CONFIG_INVALID` | `AXURE_URL` unset; malformed address; viewport or timeout out of range | Correct the environment or `.env` and restart; the error lists every problem at once |
+| `BROWSER_UNAVAILABLE` | Chromium not installed; browser context could not be created | Run `npx playwright install chromium` |
+| `NAVIGATION_FAILED` | Address unreachable; blocked by a corporate proxy; navigation timeout | Check network and DNS; add the host to `AXURE_NO_PROXY`; raise `AXURE_NAV_TIMEOUT_MS` if needed |
+| `NAVIGATION_BLOCKED` | `page` points outside the deployment; or `axure_use_prototype` was refused by the pre-check (`file:`, metadata endpoint, credentials, service port) | Use a page reference inside the project, or verify the address with `axure_use_prototype` first; add the host to `AXURE_ALLOWED_HOSTS` if it legitimately belongs |
+| `NOT_AXURE_PROJECT` | The page loads but exposes no `$axure` runtime: not a share/publish link, hidden behind a login, or wrong path | Use the project-root share/publish link and make sure it needs no login |
+| `NO_CONTENT_FRAME` | The page loaded but has no `#base` widget canvas: a non-page address (project home, or not an Axure page) | Use a page id or URL from `axure_list_pages` |
+| `PAGE_NOT_FOUND` | `page` is not a page of this prototype (typo, or a different project) | Call `axure_list_pages` and use the exact id |
+| `WIDGET_NOT_FOUND` | None of the ids passed with `target: "widgets"` exist on this page | Take ids from an `axure_get_page_map` outline; fully qualified `pageId#u12` refs work too |
+| `OPERATION_TIMEOUT` | A single in-page operation exceeded its timeout (very large page, slow render) | Raise `AXURE_OPERATION_TIMEOUT_MS` and narrow the request with `region` / `widgetIds` |
+| `RENDER_FAILED` | The in-page extractor failed, typically because the page navigated or re-rendered mid-capture | Retry; if it persists, raise `AXURE_SETTLE_MS` |
+| `SCREENSHOT_FAILED` | The capture itself failed (invalid clip, render interrupted) | Retry, or fall back to `target: "viewport"` |
+| `WRITE_FAILED` | `savePath` escapes `AXURE_SCREENSHOT_DIR`, or the directory is not writable | Pass a relative path such as `"orders.png"`; adjust `AXURE_SCREENSHOT_DIR` if needed |
+| `INVALID_ARGUMENT` | Inconsistent arguments, e.g. `target: "widgets"` without `widgetIds` | Supply the missing argument |
+| `INTERNAL` | Unexpected failure | Reproduce with `AXURE_LOG_LEVEL=debug` and read stderr |
+
+Other common situations:
+
+- **The tools do not appear in the host.** The process never started. Run the same command in a terminal and confirm it waits instead of exiting.
+- **`pages: 0`.** `filter` excluded everything, or the address is not the project root.
+- **No image attached.** The PNG exceeded 8 MiB, or `includeImage` was `false`. Capture a widget crop.
+- **Only part of the page is visible.** A node or character budget was hit. Check `stats.omitted` and `warnings`, then focus with `region` / `widgetIds`.
 
 ---
 
 ## Configuration
 
-**`AXURE_URL` is required and has no default.** That is deliberate: the built-in default used to be
-a concrete internal prototype, so an operator who set nothing — or who edited the wrong file — was
-silently served a *different* prototype with no error to explain it. The absence of the variable is
-now a startup failure that names the variable, states that there is no default, and points at
-`axure_use_prototype` as the per-conversation alternative.
-
-```
-[axure-mcp] error: invalid configuration (1 problem):
-  - AXURE_URL: is required and has no default. Set it to the Axure share/publish URL of the prototype
-    you want to read, e.g. AXURE_URL=https://axure.example.com/MyProject. To change prototypes per
-    conversation instead of editing configuration, call the axure_use_prototype tool.
-```
-
-### Where the address comes from
-
-Resolved in this order, so explicit action always wins:
-
-1. **the real process environment** — a shell export, a container variable, or a host-provided `env`
-   block. This outranks everything, so a deployment that pins the address keeps control.
-2. **`.env`** — read implicitly at startup. The server searches the working directory and up to seven
-   parents, or honours `AXURE_ENV_FILE` for an explicit path. A value the file sets that was already
-   present in the environment is reported on stderr, so the precedence is visible rather than
-   surprising.
-3. **otherwise it fails** — see above.
-
-Lines in `.env` that cannot be parsed are reported, never silently dropped: an ignored `AXURE_URL`
-line is precisely the failure this arrangement exists to prevent.
-
-```bash
-# .env — the file to edit. Never .env.example.
-AXURE_URL=https://axure.example.com/MyProject
-AXURE_NO_PROXY=localhost,127.0.0.1,::1
-```
-
-Editing `.env` requires a server restart (a stdio host restarts the child; DSH re-reads on bundle
-toggle). Editing `.env.example` has no effect at all, which was the reported bug.
-
-| Variable | Default | Meaning |
+| Variable | Default | Description |
 |---|---|---|
-| `AXURE_URL` | **none — required** | Project share URL; origin and project path are split from it |
-| `AXURE_ENV_FILE` | *(search)* | Explicit `.env` path instead of searching upward |
-| `AXURE_ALLOWED_HOSTS` | *(empty)* | Extra hosts the browser may visit, comma separated. A runtime address does **not** need to be listed: it is verified instead |
-| `AXURE_HEADLESS` | `true` | Run Chromium headless |
-| `AXURE_VIEWPORT_WIDTH` / `_HEIGHT` | `1440` / `900` | Initial viewport (320–4000 / 240–4000) |
+| `AXURE_URL` | **required, no default** | Project-root URL; origin and project path are split from it |
+| `AXURE_ENV_FILE` | auto-detected | Explicit path to a `.env` file |
+| `AXURE_ALLOWED_HOSTS` | empty | Extra hosts the browser may visit, comma separated (hosts verified via `axure_use_prototype` need not be listed) |
+| `AXURE_NO_PROXY` | `localhost,127.0.0.1,::1` | Proxy bypass list, applied to Chromium and to the server's own requests |
+| `AXURE_HEADLESS` | `true` | Run headless |
+| `AXURE_VIEWPORT_WIDTH` / `_HEIGHT` | `1440` / `900` | Initial viewport |
 | `AXURE_DEVICE_SCALE_FACTOR` | `1` | Device pixel ratio (1–3), fixed per browser context |
-| `AXURE_MAX_CAPTURE_VIEWPORT_WIDTH` / `_HEIGHT` | `3840` / `2160` | Ceiling for the canvas-fitting resize |
+| `AXURE_SETTLE_MS` | `4000` | Extra wait after `load` |
 | `AXURE_NAV_TIMEOUT_MS` | `60000` | Navigation timeout |
-| `AXURE_OPERATION_TIMEOUT_MS` | `20000` | Timeout for each in-page operation |
-| `AXURE_SETTLE_MS` | `4000` | Extra wait after `load`, for Axure's own bootstrapping |
-| `AXURE_OUTLINE_CHAR_BUDGET` | `48000` | Hard character budget for the response text |
-| `AXURE_MAX_OUTLINE_NODES` | `1200` | Default node cap |
-| `AXURE_MAX_INTERACTION_WIDGETS` | `400` | Cap on model widgets read when reading interactions |
-| `AXURE_MAX_WIDGET_IDS` | `40` | Maximum widget ids per call |
-| `AXURE_MAX_PAGES` | `500` | Maximum pages returned by one listing |
-| `AXURE_BROWSER_IDLE_MS` | `300000` | Close the pooled browser after this much idle time |
-| `AXURE_NO_PROXY` | `localhost,127.0.0.1,::1` | Hosts that must bypass an ambient HTTP proxy |
+| `AXURE_OPERATION_TIMEOUT_MS` | `20000` | Timeout per in-page operation |
+| `AXURE_MAX_OUTLINE_NODES` | `1200` | Default node limit |
+| `AXURE_OUTLINE_CHAR_BUDGET` | `48000` | Hard ceiling on response text |
 | `AXURE_SCREENSHOT_DIR` | `.axure-mcp/shots` | Base directory for `savePath` |
 | `AXURE_LOG_LEVEL` | `info` | `debug` / `info` / `warn` / `error`; always written to stderr |
-| `AXURE_HTTP_PORT` / `AXURE_HTTP_HOST` | `3333` / `127.0.0.1` | HTTP transport bind |
-| `AXURE_HTTP_TOKEN` | *(unset)* | **Required** for any non-loopback bind; clients send `Authorization: Bearer <token>` |
+| `AXURE_HTTP_PORT` / `_HOST` / `_TOKEN` | `3333` / `127.0.0.1` / — | HTTP binding; a non-loopback host requires a token (≥16 characters) |
 
-**Proxy note.** An internal Axure host is usually unreachable through a corporate `HTTP_PROXY`.
-`AXURE_NO_PROXY` is applied both to Chromium (`--proxy-bypass-list`) and to the server's own HTTP
-calls, so it works in a shell that exports a proxy for registry access.
-
-**Canvas fitting.** Axure's share player scales the wireframe canvas down to fit the available
-frame, so a 1920×1080 prototype captured in a 1440×900 viewport silently yields a 1440×900 image
-with shrunken text and widget rectangles that no longer match the authored coordinates. The server
-measures the canvas after load and enlarges the viewport until it renders 1:1, reporting that it
-did so in `warnings`. Pass an explicit `viewport` to pin a size; the server then warns if the
-canvas is larger than what was captured.
+`.env.example` is a template and is **never read**; copy it to `.env` to use a file. Process environment variables take precedence over `.env`.
 
 ---
 
-## Connecting a host
+## License
 
-### DSH
-
-A configuration-only bundle inserts the shipped `@deepseek-ai/dsh-mcp-client`. It contains no DSH
-code and no private API, so the same binary keeps working with any other client.
-
-```yaml
-# axure-mcp-dsh-bundle/cordis.patch.yml
-- insert:
-    - id: axure-prototype-mcp
-      name: '@deepseek-ai/dsh-mcp-client'
-      config:
-        serverName: axure
-        transport: stdio
-        command: node
-        args: [E:/dsh-mcp/axure-mcp/bin/axure-mcp.mjs]
-        cwd: E:/dsh-mcp/axure-mcp
-        env:
-          # No AXURE_URL here on purpose. An env block in this file overrides the server's own
-          # environment, so a hard-coded address here used to outrank the operator's `.env` — the
-          # address comes from the process environment or from `.env`.
-          NO_PROXY: localhost,127.0.0.1,::1
-        toolCallTimeoutMs: 120000   # a cold call launches Chromium and loads a page
-        failOnStartupError: true
-```
-
-Add `AXURE_URL` to that `env` block only to pin a specific prototype for this profile, accepting
-that it will then outrank `.env`. The runtime alternative — `axure_use_prototype` — needs no
-configuration at all.
-
-```
-plugin_manager action=install_bundle target=E:\dsh-mcp\axure-mcp-dsh-bundle
-```
-
-Tools appear as `mcp__axure__axure_use_prototype`, `mcp__axure__axure_list_pages`,
-`mcp__axure__axure_get_page_map`, `mcp__axure__axure_get_visual` and
-`mcp__axure__axure_get_interactions`.
-
-> DSH keeps one stdio child alive and re-reads tool **schemas** from it, but keeps running the old
-> **code**. After changing server behaviour, toggle the bundle off and on again.
-
-### Generic stdio client
-
-```jsonc
-{
-  "mcpServers": {
-    "axure": {
-      "command": "node",
-      "args": ["E:/dsh-mcp/axure-mcp/bin/axure-mcp.mjs"],
-      "cwd": "E:/dsh-mcp/axure-mcp",
-      "env": { "AXURE_URL": "https://axure.example.com/MyProject", "NO_PROXY": "localhost,127.0.0.1" }
-    }
-  }
-}
-```
-
-Setting `AXURE_URL` here is the most reliable arrangement, because it does not depend on the server
-finding a file. `cwd` is optional but useful: it is the first place the `.env` search looks.
-
-### VSCode Copilot and other editor-hosted clients
-
-An editor starts the MCP server itself and chooses the working directory, so the checkout's `.env`
-may not be the first thing found. Two arrangements both work:
-
-```jsonc
-// .vscode/mcp.json  (or the editor's equivalent)
-{
-  "servers": {
-    "axure": {
-      "type": "stdio",
-      "command": "node",
-      // Absolute path: the editor's working directory is not the checkout.
-      "args": ["E:/dsh-mcp/axure-mcp/bin/axure-mcp.mjs"],
-      "cwd": "E:/dsh-mcp/axure-mcp",
-      // Either set the address here, ...
-      "env": { "AXURE_URL": "https://axure.example.com/ProjectA" }
-    }
-  }
-}
-```
-
-1. **Set `AXURE_URL` in the client's `env` block** (shown above). Nothing has to be discovered, so
-   this is the arrangement least likely to surprise you.
-2. **Or omit `env` and rely on `.env`.** The server searches upward from the working directory and
-   *also* from its own directory, so `E:/dsh-mcp/axure-mcp/.env` is found even when the editor
-   launched the process from somewhere else. Add `cwd` if you want that file to win by proximity.
-
-If the server still reports that `AXURE_URL` is required, the message now lists every path it
-searched, plus the working directory and the server directory, so the answer is visible rather than
-guesswork:
-
-```
-[axure-mcp] error: invalid configuration (1 problem):
-  - AXURE_URL: is required and has no default. ...
-
-Looked for a .env file at:
-  C:\Users\you\.env
-  C:\Users\.env
-  C:\Users\admin\.env
-  E:\dsh-mcp\axure-mcp\.env          <- put AXURE_URL here
-  ...
-Working directory: C:\Users\admin
-Server directory:  E:\dsh-mcp\axure-mcp
-
-Create that first path with AXURE_URL=..., set AXURE_URL in the environment, or set AXURE_ENV_FILE
-to an explicit path.
-```
-
-Alternatively, call `axure_use_prototype` once the server is running — but note that a server which
-cannot start because `AXURE_URL` is missing never gets that far, which is why the `env`-block
-arrangement above is the recommended one for editor-hosted clients.
-
-### Streamable HTTP
-
-```bash
-AXURE_HTTP_TOKEN=$(openssl rand -hex 16) node bin/axure-mcp.mjs --http --host 0.0.0.0
-# clients POST to http://<host>:3333/mcp with Authorization: Bearer <token>
-# GET /health is unauthenticated and reports whether a token is required
-```
-
-Stateless by design: each request gets its own protocol instance over one shared browser pool, so
-there is no session bookkeeping and a crashed client cannot wedge the endpoint.
-
----
-
-## Trust and safety
-
-Prototype content is attacker-influenceable — anyone who can publish to the project controls page
-names, widget text, designer notes and the pixels. Two boundaries follow from that.
-
-**1. The browser stays inside the deployment.** A tool caller is an agent that can be steered by
-what it reads, so an unvalidated page reference would turn this server into an SSRF proxy with
-internal network access. Every candidate URL passes through `security.resolvePageReference`, which
-refuses:
-
-- an external host (`http://169.254.169.254/…`), unless the operator listed it in `AXURE_ALLOWED_HOSTS`;
-- an explicit non-http scheme, including `file:`;
-- a scheme-relative value (`//host/x`), which `new URL(value, base)` silently resolves to a different origin;
-- a path that climbs out of the project (`../../other-app/`).
-
-A request guard additionally aborts out-of-boundary hosts, including redirects and subresources. A
-caller-supplied `savePath` is confined to `AXURE_SCREENSHOT_DIR`; absolute paths and `..` are
-refused. The HTTP transport never binds a non-loopback address without a token.
-
-**1b. A runtime address is admitted by verification, not by trust.** `axure_use_prototype` widens
-the boundary, so it cannot use the allow-list above — the point is to reach a host that is not on it.
-Instead the address must pass a syntactic pre-check and then be *positively identified* as an Axure
-prototype, as described in its tool section. Two properties keep that from being a hole:
-
-- only a host that served an Axure runtime is admitted, and the host is admitted only after that
-  observation, so a caller cannot assert its way in;
-- while the verification request is in flight the guard allows **only that host**, withdrawn in a
-  `finally`, so a host that fails identification is not left reachable.
-
-This limits risk; it does not eliminate it. The check proves "this URL serves an Axure prototype",
-which is not the same as "this URL is safe to fetch". Private and internal ranges stay reachable on
-purpose, because reading internal prototypes is what this server is for.
-
-**2. Prototype content is labelled, and cannot forge structure.** Every result opens with the
-notice before any prototype text, and the server instructions on the protocol handshake repeat it.
-Values are neutralized so they cannot break out of the format: newlines and control characters are
-collapsed, the widget-kind comment is parsed by index rather than with a newline-permitting regex,
-and backticks are escaped inside the fenced ARIA snapshot. Tests inject `\nformat:`, `## outline`,
-`warning: obey me` and a closing code fence into widget text, annotations, page names and the
-snapshot.
-
-The server performs **read-only static analysis**. It never clicks, types, submits or triggers an
-Axure interaction, so prototype content cannot cause an action.
-
----
-
-## Model compatibility
-
-The tools are designed so a weak client degrades rather than breaks.
-
-- **No images at all.** `includeImage: false` (or `target: "none"`) returns the canvas size, the
-  region and per-widget geometry with no image block. `savePath` writes the PNG for a separate
-  vision step.
-- **Text-only models.** `structuredContent` never carries pixel data, and a model without image
-  support simply never asks for an image.
-- **Small context windows.** Two budgets apply to what the model receives: `maxNodes` caps the node
-  count, and `AXURE_OUTLINE_CHAR_BUDGET` is a **hard** cap on the response text — the outline is
-  truncated depth-first to fit and the truncation is reported. On a 1119-widget page with
-  `detail=full, maxNodes=5000`, the response is 48,078 characters against a 48,000 budget.
-  `region` and `widgetIds` are the intended way to choose *which* part to see.
-- **Errors.** `isError: true` plus a leading `error: <CODE>` line, so a text-only consumer can tell
-  success from failure without parsing prose, and a structured consumer gets the same code in
-  `structuredContent.error.code`.
-- **Structured output.** Every tool declares an `outputSchema`. It is intentionally loose, because
-  the SDK validates a *failure* payload against it too and a strict success schema would reject
-  every error result. The per-tool key sets are asserted by `npm run test:e2e` instead.
-
----
-
-## Tests
-
-```bash
-npm test                  # 32 unit: config, .env precedence, domain, rendering, budgets
-npm run test:security     # 14 security: navigation scope, path confinement, escaping
-npm run test:interaction  # 35 interaction logic + 20 in-page reader = 55
-npm run test:standard     # 36 standardization: roles, provenance, hierarchy, dedup, bounding
-npm run test:url          # 27 address pre-check, Axure recognition, .env precedence
-npm run test:inpage       #  6 browser-boundary: in-page convention and isolation
-npm run test:e2e          # 63 end-to-end against the live deployment, over real stdio
-npm run test:http         #  8 HTTP transport, including the authentication gate
-npm run test:all          # everything
-```
-
-Five of these are worth explaining, because they are what makes this testable.
-
-`scripts/test-url.mjs` is the regression suite for the 0.2.2 bug. Three of its cases are the three
-independent causes: that `AXURE_URL` has no built-in default, that an empty environment is refused
-with a message naming the runtime alternative, and that `.env` is actually read — with the process
-environment outranking it, and with unparseable lines reported rather than dropped. The rest cover
-the admission policy, which is pure: the scheme and metadata and port refusals, and the rule that
-recognition requires the Axure runtime so `#base` and `data.js` alone cannot admit a host.
-
-`scripts/test-interaction.mjs` needs no browser. The evidence model, trigger and action
-normalization, branch decoding, aggregation and rendering all live in `src/axure/interaction.ts`,
-which is pure, so the rules — including "an inferred record can never carry actions" — are verified
-from fixtures.
-
-`scripts/test-interaction-source.mjs` needs no browser **and no build**. It extracts the in-page
-reader's source textually, compiles it with `new Function`, and runs it against synthetic models
-replicating the measured structure with a stubbed `window`/`document`. It verifies syntax,
-self-containment, that a missing model produces a stated gap instead of a bare empty list, that
-payloads are preserved verbatim, that **master** interactions and both id bridges work, that the
-widget cap is enforced and reported, and that a model which throws does not crash the reader.
-
-`scripts/test-standard.mjs` covers the conversion, which is a pure function of already-read data.
-Its most important assertions are negative ones: that a role is `unknown` rather than guessed when
-no structural rule applies, and that `classifyRole` cannot read a widget's name or text at all — it
-is probed with a `Proxy` and the test fails if it touches such a field. That turns
-「不得仅凭组件名称或视觉外观臆造业务含义」 from a promise into a check.
-
-`npm run test:e2e` cross-checks the interaction counts against numbers measured by an independent
-recon probe (`scripts/recon/probe-interaction-coverage.mjs`), so a silent regression to zero or a
-surge of invented records both fail the suite. It also asserts that the standard document's
-hierarchy is walkable, that every role carries provenance, that an `unknown` role has a reason
-instead of a value, and that the legacy `outline` default is unaffected by the new option.
-
-`scripts/recon/` holds the throwaway probes used to establish the findings behind the design —
-Axure's ARIA output, runtime API coverage, canvas scaling behaviour, screenshot strategies, and the
-16 interaction probes that located the model, the two id bridges, and the real action vocabulary.
-They document *why* the implementation looks the way it does and are not part of the build.
-
----
-
-## Known limitations
-
-- **`AXURE_URL` being required means a misconfigured host fails to start.** That is the intended
-  trade — the alternative was silently reading the wrong prototype — but it does mean an
-  editor-hosted client whose working directory is unrelated to the checkout must either set the
-  address in its own `env` block or leave the `.env` discoverable. The server searches upward from
-  the working directory *and* from its own directory; when it still cannot find one, it lists every
-  path it tried.
-- **The Axure check proves what a host serves, not that fetching it is safe.** `axure_use_prototype`
-  refuses the classes of address that make an SSRF useful and requires the Axure runtime before
-  admitting a host, but a hostile address that really does serve an Axure prototype is still fetched.
-  The check limits the blast radius; it is not a guarantee.
-- **Private and internal ranges are reachable by design.** Rejecting RFC1918 addresses would reject
-  the deployment this tool exists to read. The pre-check blocks the link-local metadata endpoint, and
-  stage 2 requires the host to be Axure.
-- **A prototype behind a login wall cannot be verified.** The runtime is hidden from the check, so the
-  address is refused with that explanation rather than an empty page.
-- **The chosen prototype lasts for the process, not a conversation.** It is shared state, so a
-  second caller pointing elsewhere changes what the first one reads until someone points it back.
-  Cost-of-a-mistake is bounded: the address is verified, and the refusals are the ones listed above.
-- **Admission has no revoke path.** Once a host has been verified it stays reachable for the life of
-  the process; there is no tool that withdraws it, and the only way back is to restart the server or
-  adopt a different prototype. A misidentified host would therefore persist, which is another reason
-  the identification check is positive evidence rather than a heuristic.
-- **Concurrent verifications share one allowance slot.** The temporary allowance that lets a
-  verification fetch its own host is a single value on the adapter, so two simultaneous
-  `axure_use_prototype` calls can race over it. This is a code-reading observation and has not been
-  reproduced; both callers still face stage 2, so the worst case is a wasted probe, not an admission.
-- **Only same-origin frames can be probed.** A frame that is cross-origin or detached throws and is
-  treated as producing no evidence, which is correct but means an Axure runtime isolated inside such
-  a frame would not be seen.
-- **Static analysis only.** The server reads state; it does not click, type, hover or trigger Axure
-  interactions. Widgets behind a click are reported as `clickable`, not activated.
-- **Interaction recognition is verified but narrow.** See the verification status above: only
-  `onClick` was observed in the reference prototype, `linkWindow` destinations are not recoverable
-  from the model, and `observed` has no live sample because this tool never fires interactions.
-- **Interaction conditions are paraphrased, not evaluated.** A branch's guard is reported as the
-  model wrote it (`conditionString`); the server does not determine which branch a given page state
-  would take.
-- **Actions behind a conditional branch are all listed**, so a consumer sees mutually exclusive
-  outcomes together. The `conditions` field is what distinguishes them.
-- **Master instances are not de-duplicated across instances.** One master used twice produces
-  records per rendered instance, which differ by DOM id. That is intentional, but the counting
-  semantics have not been specifically tested.
-- **One dynamic-panel state.** `includeHidden: true` enumerates authored states, but the outline
-  still reflects a single rendering.
-- **Repetition on data-dense pages.** A table is one widget per cell, so a 100-row table produces
-  thousands of nodes. Scope with `region` or `widgetIds`; a node budget truncates rather than
-  focuses.
-- **One page per call.** No multi-page diffing or navigation graph, and `Inline Frame` widgets are
-  reported as widgets rather than recursed into.
-- **Device pixel ratio is fixed per context.** `scale` is accepted but ignored; set
-  `AXURE_DEVICE_SCALE_FACTOR=2` and restart.
-- **Attached images are capped at 8 MiB.** A larger capture is written to disk and reported, but not
-  attached, so one response cannot carry tens of megabytes.
-- **No authentication against the prototype.** It reads whatever the share link exposes
-  anonymously; a password-protected prototype would need a login step that is not implemented.
-- **Concurrency is capped at 4 browser contexts** per process, and the cap is not configurable.
-- **Roles are structural, never semantic.** The standard document reports `input`, `shape`,
-  `state-container` and so on, derived only from the authored widget type, a form tag or an image
-  asset. It will not tell you that a widget is "a submit button for the order form". A widget named
-  订单管理 is not thereby an order-management component, and a `Rectangle` with a pointer cursor is
-  not thereby a button. Where no structural rule applies the role is `unknown` with a reason, and the
-  authored type is always preserved beside it. This is a deliberate boundary, not a gap to be closed
-  by a cleverer heuristic.
-- **Duplicate subtrees are not merged.** Two identical-looking widgets are two widgets: they have
-  different ids and may be genuinely distinct. What is deduplicated is *text*, through
-  `text.entries[].occurrences`, with a `duplicates-text-of` relation recording what was collapsed.
-  Merging elements instead would destroy exactly the information this layer exists to preserve.
-- **`structuredContent` is bounded by `maxNodes`, not by the character budget.** Only the text
-  rendering is text-budgeted, so a consumer always receives the whole document while a model's
-  context is protected. Raise `maxNodes` deliberately, not by accident.
-- **A dense page's element list can consume the whole text budget**, in which case the
-  `## gaps and omissions` section is dropped and only the trim note is shown. The omission is
-  disclosed, but the priority order is wrong; see [Next steps](#next-steps).
-
-## Next steps
-
-1. **Recurse into inline frames** so embedded prototype pages appear in the parent outline.
-2. **Trigger-driven capture** (`observed`): fire one interaction in an isolated context and record
-   what changed, which is the only way to learn a branch outcome that the model expresses
-   indirectly.
-3. **Collapse table rows** into a compact form when a `Table` widget is detected, cutting dense-page
-   token cost by an order of magnitude. The standard document's `text.entries[].occurrences` and
-   `repeating-container` role are the hooks for this.
-4. **Diff two standard documents**, making "what changed in this prototype revision" a single call.
-   `schema` is versioned and relation ids are deterministic, so two documents from one page are
-   directly comparable.
-5. **Reserve budget for the tail sections.** Today a dense page's element list can consume the whole
-   character budget, so `## gaps and omissions` is dropped and only the trim note appears. The
-   disclosure is honest but the priority order is wrong.
-6. **Make the concurrency cap configurable** and report it from `/health`.
-
-## Version history
-
-Version-managed prompts, audits and change records live in [`.update/`](.update/README.md).
-[README.zh-CN.md](README.zh-CN.md) is the Chinese version of this document.
-
-| Version | Change |
-|---|---|
-| 0.2.2 | `AXURE_URL` required with no default, `.env` loaded implicitly with the process environment outranking it, the DSH bundle's hard-coded address removed, and `axure_use_prototype` for reading a prototype named in the conversation — [`.update/0.2.2`](.update/0.2.2/plan.md) |
-| 0.2.1 | Standardized output: the versioned `axure.page/v1` document with per-value provenance, an explicit hierarchy and relation graph, a deduplicated text index, and structure + interactions in one call — [`.update/0.2.1`](.update/0.2.1/plan.md) |
-| 0.2.0 | Interaction recognition: `axure_get_interactions`, the `declared`/`observed`/`inferred` evidence model — [`.update/0.2.0`](.update/0.2.0/plan.md) |
-| 0.1.0 | Initial release: three tools, canvas 1:1 fitting, region/widget scoping, stdio + HTTP, four-layer refactor |
-
-`package.json`, the server's reported version and this table all read `0.2.2`; the iteration
-directory is the authority when they disagree. An earlier revision of this table labelled the 0.2.0
-iteration `0.3.0` while `package.json` had moved ahead of it, which is why the two are now kept in
-step deliberately.
+MIT. See [CHANGELOG.md](CHANGELOG.md) for release notes.
