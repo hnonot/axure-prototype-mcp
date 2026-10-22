@@ -223,6 +223,8 @@ Other common situations:
 
 ## Configuration
 
+The settings a deployment usually changes are listed here; `.env.example` is the complete list. Every one of them takes effect from `.env`, with a single exception: `AXURE_ENV_FILE` decides which file to read, so it can only be supplied in the process environment.
+
 | Variable | Default | Description |
 |---|---|---|
 | `AXURE_URL` | **required, no default** | Project-root URL; origin and project path are split from it |
@@ -237,6 +239,8 @@ Other common situations:
 | `AXURE_OPERATION_TIMEOUT_MS` | `20000` | Timeout per in-page operation |
 | `AXURE_MAX_OUTLINE_NODES` | `1200` | Default node limit |
 | `AXURE_OUTLINE_CHAR_BUDGET` | `48000` | Hard ceiling on response text |
+| `AXURE_MAX_WIDGET_IDS` | `40` | Most widget ids one call may name |
+| `AXURE_MAX_PAGES` | `500` | Most pages `axure_list_pages` returns at once |
 | `AXURE_SCREENSHOT_DIR` | `.axure-mcp/shots` | Base directory for `savePath` |
 | `AXURE_LOG_LEVEL` | `info` | `debug` / `info` / `warn` / `error`; always written to stderr |
 | `AXURE_HTTP_PORT` / `_HOST` / `_TOKEN` | `3333` / `127.0.0.1` / — | HTTP binding; a non-loopback host requires a token (≥16 characters) |

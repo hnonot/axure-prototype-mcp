@@ -223,6 +223,8 @@ retryable: false
 
 ## 配置
 
+常用项如下，完整清单见 `.env.example`。除 `AXURE_ENV_FILE` 外（它决定读哪个文件，只能作为进程环境变量），其余各项写入 `.env` 均生效。
+
 | 变量 | 默认 | 说明 |
 |---|---|---|
 | `AXURE_URL` | **必填，无默认** | 原型项目根地址；origin 与项目路径从中拆分 |
@@ -237,6 +239,8 @@ retryable: false
 | `AXURE_OPERATION_TIMEOUT_MS` | `20000` | 单次页内操作超时 |
 | `AXURE_MAX_OUTLINE_NODES` | `1200` | 默认节点上限 |
 | `AXURE_OUTLINE_CHAR_BUDGET` | `48000` | 响应文本硬上限 |
+| `AXURE_MAX_WIDGET_IDS` | `40` | 单次调用可指定的控件 id 上限 |
+| `AXURE_MAX_PAGES` | `500` | `axure_list_pages` 单次返回的页面上限 |
 | `AXURE_SCREENSHOT_DIR` | `.axure-mcp/shots` | `savePath` 的基准目录 |
 | `AXURE_LOG_LEVEL` | `info` | `debug` / `info` / `warn` / `error`，始终写入 stderr |
 | `AXURE_HTTP_PORT` / `_HOST` / `_TOKEN` | `3333` / `127.0.0.1` / — | HTTP 传输绑定；非回环地址必须设 token（≥16 位） |

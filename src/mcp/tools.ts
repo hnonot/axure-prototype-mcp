@@ -61,13 +61,15 @@ const pageSelector = z
       'Axure deployment. Omit for the prototype entry page. Any URL outside the deployment is refused.',
   );
 
-const widgetIdsSchema = z
-  .array(z.string().max(128))
-  .max(40)
-  .optional()
-  .describe(
-    'Widget ids from an earlier axure_get_page_map call (e.g. ["u12"]), or fully qualified refs (e.g. "6k5oyo#u12").',
-  );
+/**
+ * Widget-id list, bounded by the configured cap.
+ *
+ * A factory rather than a module constant because the bound is `AXURE_MAX_WIDGET_IDS`. It used to
+ * be a hard-coded `.max(40)`, which made that setting parsed, range-checked, listed in `--help`
+ * and completely inert: no caller could observe any difference. The default is still 40, so a
+ * server with nothing configured behaves exactly as before.
+ */
+const widgetIdsSchema = (max: number) => z.array(z.string().max(128)).max(max).optional();
 
 const spaceSchema = z
   .enum(['page', 'viewport'])
@@ -267,7 +269,7 @@ export function registerTools(server: McpServer, context: ToolContext): void {
               'viewport pixels with space="viewport"). Nodes that only partly overlap are kept, and ancestors stay in ' +
               'the tree so the hierarchy stays readable.',
           ),
-        widgetIds: widgetIdsSchema.describe(
+        widgetIds: widgetIdsSchema(context.config.maxWidgetIds).describe(
           'Restrict the outline to these widgets, plus their ancestors and all their descendants. Use it to expand one ' +
             'area of an earlier scoped map, or to pull full detail for a specific table or panel.',
         ),
@@ -359,7 +361,9 @@ export function registerTools(server: McpServer, context: ToolContext): void {
           .enum(['viewport', 'full-page', 'widgets', 'none'])
           .optional()
           .describe('What to capture. Defaults to "viewport". Use "full-page" for the whole canvas, "none" for geometry only.'),
-        widgetIds: widgetIdsSchema.describe('Required when target="widgets": the widgets to crop to, up to 40.'),
+        widgetIds: widgetIdsSchema(context.config.maxWidgetIds).describe(
+          `Required when target="widgets": the widgets to crop to, up to ${context.config.maxWidgetIds}.`,
+        ),
         space: spaceSchema.optional(),
         includeImage: z
           .boolean()

@@ -119,9 +119,20 @@ function loadEnvironment() {
   return merged.env;
 }
 
+/**
+ * The merged environment — the process environment first, then `.env`.
+ *
+ * Kept in a variable because **every** setting must be read from it, including the HTTP
+ * transport's. Those three used to be read straight off `process.env`, so a value placed in
+ * `.env` had no effect: the file was read, the key appeared in the merged environment, and the
+ * HTTP branch never looked there. A documented setting that silently does nothing is the same
+ * class of bug as editing `.env` and being served another prototype.
+ */
+const env = loadEnvironment();
+
 let config;
 try {
-  config = loadConfig(loadEnvironment());
+  config = loadConfig(env);
 } catch (error) {
   // When the failure is the missing address, say where `.env` was looked for. A host that chose an
   // unexpected working directory is the likeliest reason, and a bare "is required" leaves the
@@ -145,9 +156,11 @@ const logger = createLogger(config.logLevel, { server: 'axure-prototype' });
 
 if (flag('http')) {
   const { startHttpTransport } = await import('../dist/http.js');
-  const port = Number.parseInt(value('port', process.env.AXURE_HTTP_PORT ?? '3333'), 10);
-  const host = value('host', process.env.AXURE_HTTP_HOST ?? '127.0.0.1');
-  const token = process.env.AXURE_HTTP_TOKEN;
+  // Command-line flags still win over the environment; the environment is the merged one, so
+  // these three work from `.env` exactly like every other setting.
+  const port = Number.parseInt(value('port', env.AXURE_HTTP_PORT ?? '3333'), 10);
+  const host = value('host', env.AXURE_HTTP_HOST ?? '127.0.0.1');
+  const token = env.AXURE_HTTP_TOKEN?.trim() || undefined;
 
   const primary = createRuntime({ config, log: logger });
   const started = await startHttpTransport(

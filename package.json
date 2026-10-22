@@ -1,6 +1,6 @@
 {
   "name": "axure-prototype-mcp",
-  "version": "0.2.3",
+  "version": "0.2.4",
   "description": "Standalone MCP server exposing an Axure prototype as structural, spatial, visual and interaction context for any MCP host.",
   "license": "MIT",
   "type": "module",
@@ -39,8 +39,7 @@
     "prototype",
     "playwright",
     "agent",
-    "ui-analysis",
-    "accessibility-tree"
+    "ui-analysis"
   ],
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.32.1",
@@ -55,18 +54,19 @@
     "build": "tsc -p tsconfig.json",
     "watch": "tsc -p tsconfig.json --watch",
     "clean": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\"",
-    "prepublishOnly": "npm run clean && npm run build && npm test && npm run test:security && npm run test:url",
+    "prepublishOnly": "npm run clean && npm run build && npm test && npm run test:security && npm run test:url && npm run test:config",
     "start": "node bin/axure-mcp.mjs",
     "http": "node bin/axure-mcp.mjs --http --port 3333",
     "test": "node scripts/unittest.mjs",
     "test:security": "node scripts/test-security.mjs",
     "test:url": "node scripts/test-url.mjs",
+    "test:config": "node scripts/test-config.mjs",
     "test:interaction": "node scripts/test-interaction.mjs && node scripts/test-interaction-source.mjs",
     "test:standard": "node scripts/test-standard.mjs",
     "test:inpage": "node scripts/test-inpage.mjs",
     "test:e2e": "node scripts/selftest.mjs",
     "test:http": "node scripts/httptest.mjs",
-    "test:all": "npm test && npm run test:security && npm run test:url && npm run test:interaction && npm run test:standard && npm run test:inpage && npm run test:e2e && npm run test:http",
+    "test:all": "npm test && npm run test:security && npm run test:url && npm run test:config && npm run test:interaction && npm run test:standard && npm run test:inpage && npm run test:e2e && npm run test:http",
     "verify:package": "node scripts/verify-package.mjs",
     "install-browser": "playwright install chromium"
   },

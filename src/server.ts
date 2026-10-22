@@ -19,7 +19,7 @@ import { AxureService } from './service.js';
 import { registerTools } from './mcp/tools.js';
 
 export const SERVER_NAME = 'axure-prototype';
-export const SERVER_VERSION = '0.2.3';
+export const SERVER_VERSION = '0.2.4';
 
 /**
  * Server instructions, sent once during initialization.
